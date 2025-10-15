@@ -1,65 +1,84 @@
-# NordVPN Gateway Container
+# NordVPN Gateway Container (v2.0)
 
-A Docker container that turns your host into a NordVPN-based gateway for your local network or for applications inside Docker.
-This image automatically manages a secure VPN connection with killswitch, NAT, MTU optimization, MSS clamping, and automatic reconnects.
+A stable, self-healing Docker container that turns your host into a **NordVPN-based gateway** — featuring a killswitch, automatic MTU detection, smart reconnects, server optimization, and full support for **internal services or external WireGuard servers**.
 
 ---
 ## ✨ Features
-- **Secure Foundation**: Uses the official NordVPN Client (`v4.1.1` or newer) with a secure token login and killswitch enabled by default to prevent leaks.
-- **Smart Server Selection**:
-  - `VPN_AUTO_CONNECT=best` automatically finds the server with the lowest latency via parallel ping tests.
-  - A proactive background process caches the best server periodically, ensuring lightning-fast and killswitch-proof reconnects.
-- **Performance & Stability**:
-  - Automatically finds the optimal **MTU** with a robust `ping`-based test to prevent connection freezes.
-  - A built-in **keep-alive** mechanism (ping and HTTP checks) ensures the connection stays active.
-  - Robust reconnect logic handles connection drops gracefully.
-- **Full Gateway Functionality**: Provides NAT/MASQUERADE and MSS clamping for all devices on your network.
-- **Flexible Connection**: Supports NordLynx/OpenVPN and allows connecting to specific countries, server groups (like P2P), or individual servers.
-- **Easy Management**: Includes a Docker Healthcheck for monitoring and a `DEBUG` mode for detailed logs.
+
+- **Secure & Self-Healing**
+  - Based on the official NordVPN client (`v4.1.1+`)
+  - Token-based authentication (recommended via Docker secret)
+  - Built-in killswitch prevents leaks when VPN disconnects
+  - Automatic recovery on network or VPN failure
+
+- **Smart Server Selection**
+  - `VPN_AUTO_CONNECT=best` finds the fastest server via parallel ping tests
+  - Background task periodically re-checks and caches the “Best Server”
+
+- **Performance & Stability**
+  - Automatic MTU detection using ping-based testing
+  - MSS clamping for optimal TCP performance
+  - Active connection checks (`curl` + `ping`) with robust reconnect logic
+
+- **Full Gateway Functionality**
+  - NAT / MASQUERADE for LAN or Docker services
+  - LAN bypass via `ALLOWLIST_SUBNET`
+
+- **Extensible**
+  - Easily attach other containers (e.g., AdGuard, JDownloader, proxies)
+  - Full WireGuard integration (via separate macvlan) with active NordVPN killswitch
 
 ---
 ## 🛠 Requirements
-A Docker host with:
-- `cap_add: NET_ADMIN` capability (and optionally `NET_RAW` for smart server selection)
-- `/dev/net/tun` device access
-- A valid NordVPN token (recommended via Docker secret at `/run/secrets/nordvpn_token`)
+
+- Docker host with:
+  - `cap_add: NET_ADMIN` (required)
+  - `/dev/net/tun` available
+  - (Optional) `cap_add: NET_RAW` for best server auto-detection
+- Valid NordVPN token (recommended: `/run/secrets/nordvpn_token`)
 
 ---
 ## 📦 Environment Variables
+
 | Variable | Default | Description |
-| :--- | :--- | :--- |
-| `VPN_COUNTRY` | `Germany` | Country to connect to (e.g., `United_States`). |
-| `VPN_GROUP` | `p2p` | **Optional server group.** Use `p2p`, `double_vpn`, `onion_over_vpn`, `obfuscated`, or `dedicated_ip`. |
-| `VPN_SERVER` | *(unset)* | **Optional specific server.** Overrides `VPN_COUNTRY` and `VPN_GROUP` (e.g., `de1234.nordvpn.com`). |
-| `VPN_TECHNOLOGY` | `NordLynx` | `NordLynx` or `OpenVPN`. |
-| `PROTOCOL` | *(unset)* | For OpenVPN only: `udp` or `tcp`. |
-| `KILLSWITCH` | `on` | Enable/disable NordVPN's killswitch feature. |
-| `POST_QUANTUM` | `on` | Enable post-quantum VPN protection. |
-| `ALLOWLIST_SUBNET` | *(unset)* | Subnet that can use the gateway (e.g., `192.168.1.0/24`). |
-| `CHECK_INTERVAL` | `60` | Seconds between active connectivity checks. |
-| `RETRY_COUNT` | `2` | Number of retries for the connectivity check before triggering a reconnect. |
-| `RETRY_DELAY` | `2` | Seconds to wait between retries. |
-| `CONNECT_TIMEOUT` | `60` | Max seconds to wait for the `nordvpn connect` command to complete. |
-| `VPN_MTU` | `auto` | Set a specific MTU, or `auto` for detection via binary search ping test. |
-| `VPN_REFRESH` | `0` | Minutes before a forced reconnect (`0` = disabled). |
-| `LOG_STATUS_INTERVAL` | `0` | Minutes between periodic `nordvpn status` logs (`0` = disabled). |
-| `DEBUG` | `off` | Set to `on` for detailed logs, including keep-alive ping results. |
-| `NORDVPN_TOKEN` | *(unset)* | Your token. Less secure than using a Docker secret. |
-| `VPN_AUTO_CONNECT` | `off` | Set to `best` to automatically find the best server on startup. |
-| `VPN_BEST_SERVER_CHECK_INTERVAL` | `30` | Minutes between background best-server checks when `VPN_AUTO_CONNECT=best`. |
+|:---|:---|:---|
+| `VPN_COUNTRY` | `Germany` | Country to connect to |
+| `VPN_GROUP` | `p2p` | Server group (`p2p`, `double_vpn`, `obfuscated`, …) |
+| `VPN_SERVER` | *(unset)* | Specific server (e.g., `de1234.nordvpn.com`) |
+| `VPN_TECHNOLOGY` | `NordLynx` | `NordLynx` or `OpenVPN` |
+| `PROTOCOL` | *(unset)* | OpenVPN only: `udp` or `tcp` |
+| `VPN_AUTO_CONNECT` | `off` | `best` = automatically finds fastest server |
+| `VPN_BEST_SERVER_CHECK_INTERVAL` | `30` | Minutes between best-server checks |
+| `KILLSWITCH` | `on` | Enables NordVPN’s built-in killswitch |
+| `ALLOWLIST_SUBNET` | *(unset)* | Allowed LAN subnets (e.g., `192.168.179.0/24`) |
+| `POST_QUANTUM` | `on` | Enables post-quantum protection |
+| `VPN_MTU` | `auto` | MTU autodetect or manual (e.g., `1340`) |
+| `VPN_REFRESH` | `0` | Force reconnect after X minutes (`0` = disabled) |
+| `CHECK_INTERVAL` | `60` | Interval between connection checks |
+| `RETRY_COUNT` | `3` | Retry attempts before reconnect |
+| `RETRY_DELAY` | `2` | Delay between retries |
+| `CONNECT_TIMEOUT` | `30` | Connection timeout (seconds) |
+| `LOG_STATUS_INTERVAL` | `0` | Log VPN status every X minutes (`0` = off) |
+| `DEBUG` | `off` | Enable detailed logs |
+| `WIREGUARD_BYPASS` | `off` | Allow traffic from external WireGuard server |
+| `WIREGUARD_SERVER_IP` | *(unset)* | IP of WireGuard server (e.g., `192.168.179.229`) |
+| `WIREGUARD_SUBNET` | *(unset)* | Subnet of WireGuard clients (e.g., `10.10.10.0/24`) |
 
 ---
-## 🚀 Quick Start (Bridge Mode)
+## 🚀 Quick Start (macvlan Gateway)
+
 ```yaml
 version: "3.9"
-
 services:
-  nordvpn-gateway:
+  vpn:
     image: boingbasti/nordvpn-gateway:latest
-    container_name: nordvpn-gateway
+    container_name: nordvpn
+    networks:
+      macvlan-vpn:
+        ipv4_address: 192.168.179.100
     cap_add:
       - NET_ADMIN
-      # - NET_RAW # Optional: required on some hosts for best-server auto detection
+      - NET_RAW
     devices:
       - /dev/net/tun
     volumes:
@@ -72,39 +91,30 @@ services:
       - VPN_AUTO_CONNECT=best
       - VPN_MTU=auto
       - KILLSWITCH=on
-      - POST_QUANTUM=on
+      - ALLOWLIST_SUBNET=192.168.179.0/24
+    sysctls:
+      - net.ipv4.ip_forward=1
     restart: unless-stopped
-```
 
----
-## 🌐 Gateway for LAN devices
-```yaml
 networks:
-  macvlan:
+  macvlan-vpn:
     external: true
 ```
 
 ---
-## 🔍 Troubleshooting
-- **`VPN_AUTO_CONNECT=best` fails or finds no servers**: Add the `NET_RAW` capability.
-- **Freezes / slow loading**: Usually an MTU issue. Use `VPN_MTU=auto` or try manual `1340`.
-- **Daemon not reachable**: Ensure `/dev/net/tun` exists and `NET_ADMIN` is set.
-- **No VPN interface**: Likely connection failure → check token and settings.
-- **Detailed logs**: Run with `DEBUG=on`.
+## 🌐 Optional Add-ons
 
----
-## 🧩 Optional: Add Proxies inside the VPN
 ### SOCKS5 Proxy
 ```yaml
-  socks5-proxy:
+  socks5:
     image: boingbasti/nordvpn-socks5:latest
     container_name: nordvpn-socks5
-    network_mode: "service:nordvpn-gateway"
+    network_mode: "service:vpn"
     depends_on:
-      - nordvpn-gateway
+      - vpn
     environment:
       - PROXY_PORT=1080
-      - ALLOWED_IPS=192.168.1.0/24
+      - ALLOWED_IPS=192.168.179.0/24
     restart: unless-stopped
 ```
 
@@ -113,68 +123,72 @@ networks:
   http-proxy:
     image: boingbasti/nordvpn-privoxy:latest
     container_name: nordvpn-privoxy
-    network_mode: "service:nordvpn-gateway"
+    network_mode: "service:vpn"
     depends_on:
-      - nordvpn-gateway
+      - vpn
     restart: unless-stopped
 ```
 
 ---
-## 🌐 Example: Full `macvlan` Setup with Proxies
+## 🧩 WireGuard Integration (`WIREGUARD_BYPASS`)
+
+This feature allows a **dedicated WireGuard server** (e.g., `wg-easy`)  
+to route through the NordVPN gateway — remaining **killswitch-protected**  
+while still maintaining full LAN access.
+
+> ⚠️ The WireGuard server **must run in its own macvlan network**.  
+> If it shares the same macvlan as the NordVPN container,  
+> the NordVPN connection will drop (Linux macvlan limitation).
+
+### Example:
 ```yaml
-version: "3.9"
-
-networks:
-  lan:
-    external: true
-
-services:
-  vpn-gateway:
-    image: boingbasti/nordvpn-gateway:latest
-    container_name: nordvpn-gateway
+  wg-easy:
+    image: ghcr.io/wg-easy/wg-easy:15
+    container_name: wg-easy-nvpn
+    networks:
+      macvlan-wg:
+        ipv4_address: 192.168.179.229
+    volumes:
+      - ./wg-easy:/etc/wireguard
     cap_add:
       - NET_ADMIN
-      # - NET_RAW # Optional: required on some hosts for best-server auto detection
-    devices:
-      - /dev/net/tun
-    networks:
-      lan:
-        ipv4_address: 192.168.1.240
-    volumes:
-      - ./nordvpn_token.txt:/run/secrets/nordvpn_token:ro
-      - /etc/localtime:/etc/localtime:ro
-    environment:
-      - VPN_COUNTRY=Germany
-      - VPN_GROUP=p2p
-      - VPN_TECHNOLOGY=NordLynx
-      - VPN_AUTO_CONNECT=best
-      - VPN_MTU=auto
-      - KILLSWITCH=on
-      - ALLOWLIST_SUBNET=192.168.1.0/24
-      - CHECK_INTERVAL=60
-    restart: unless-stopped
-
-  socks5-proxy:
-    image: boingbasti/nordvpn-socks5:latest
-    container_name: nordvpn-socks5
-    network_mode: "service:vpn-gateway"
-    depends_on:
-      - vpn-gateway
-    environment:
-      - PROXY_PORT=1080
-      - ALLOWED_IPS=192.168.1.0/24
-    restart: unless-stopped
-
-  http-proxy:
-    image: boingbasti/nordvpn-privoxy:latest
-    container_name: nordvpn-privoxy
-    network_mode: "service:vpn-gateway"
-    depends_on:
-      - vpn-gateway
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
     restart: unless-stopped
 ```
+
+### Enable in NordVPN Gateway:
+```yaml
+    environment:
+      - WIREGUARD_BYPASS=on
+      - WIREGUARD_SERVER_IP=192.168.179.229
+      - WIREGUARD_SUBNET=10.10.10.0/24
+```
+
+---
+## 🔍 Troubleshooting
+
+| Problem | Cause | Solution |
+|:--|:--|:--|
+| No Internet despite VPN | MTU too high | Set `VPN_MTU=1340` |
+| No LAN access | Killswitch active | Add `ALLOWLIST_SUBNET` |
+| No WireGuard handshake | Same macvlan | Use separate macvlan for wg-easy |
+| `VPN_AUTO_CONNECT=best` hangs | Missing `NET_RAW` | Add `cap_add: NET_RAW` |
+| VPN stuck on connect | Token or DNS issue | Check token, restart container |
+
+---
+## 🧠 How It Works
+
+1. Container starts NordVPN in NordLynx mode  
+2. NAT rules route local traffic through VPN  
+3. Healthcheck + keepalive monitor connection  
+4. Killswitch enforces VPN-only routing  
+5. When `WIREGUARD_BYPASS` is enabled, routing for WireGuard subnet and server IP is allowed  
 
 ---
 ## 📎 Links
-- **Docker Hub**: [boingbasti/nordvpn-gateway](https://hub.docker.com/r/boingbasti/nordvpn-gateway)
-- **GitHub**: [boingbasti/docker-nordvpn-gateway](https://github.com/boingbasti/docker-nordvpn-gateway)
+
+- 🐳 **Docker Hub**: [boingbasti/nordvpn-gateway](https://hub.docker.com/r/boingbasti/nordvpn-gateway)  
+- 💻 **GitHub**: [boingbasti/docker-nordvpn-gateway](https://github.com/boingbasti/docker-nordvpn-gateway)  

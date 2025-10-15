@@ -72,6 +72,11 @@ VPN_GROUP=${VPN_GROUP:-p2p}
 LOG_STATUS_INTERVAL=${LOG_STATUS_INTERVAL:-0}
 CONNECT_TIMEOUT=${CONNECT_TIMEOUT:-60}
 VPN_AUTO_CONNECT=${VPN_AUTO_CONNECT:-off}
+# Neue Defaults fÃÂ¼r WireGuard Support
+WIREGUARD_BYPASS=${WIREGUARD_BYPASS:-off}
+WIREGUARD_SERVER_IP=${WIREGUARD_SERVER_IP:-}
+WIREGUARD_SUBNET=${WIREGUARD_SUBNET:-}
+
 
 # MTU cache
 MTU_CACHE=""
@@ -83,16 +88,16 @@ find_best_mtu() {
   local LOWER_BOUND=1300
   local UPPER_BOUND=1500
   local ICMP_HEADER_SIZE=28
-  
+
   log "Starting fast MTU detection (binary search)..."
-  
+
   local best_payload_size=0
   local low=${LOWER_BOUND}
   local high=${UPPER_BOUND}
 
   while [ ${low} -le ${high} ]; do
     mid=$(( (low + high) / 2 ))
-    
+
     if ping -c 1 -W 1 -M do -s ${mid} ${TARGET_HOST} &> /dev/null; then
       debug_log "MTU Check: Payload of ${mid} bytes is OK."
       best_payload_size=${mid}
@@ -102,7 +107,7 @@ find_best_mtu() {
       high=$(( mid - 1 ))
     fi
   done
-  
+
   if [ ${best_payload_size} -gt 0 ]; then
     local raw_network_mtu=$(( best_payload_size + ICMP_HEADER_SIZE ))
     local final_vpn_mtu
@@ -112,11 +117,11 @@ find_best_mtu() {
     else # Default to NordLynx
       final_vpn_mtu=$(( raw_network_mtu - 80 ))
     fi
-    
+
     log "MTU detection complete. Optimal Network MTU: ${raw_network_mtu}. Recommended VPN MTU: ${final_vpn_mtu}"
     echo "${final_vpn_mtu}"
   else
-    log "WARNING: `ping` based MTU detection failed. Falling back to a safe default."
+    log "WARNING: 'ping' based MTU detection failed. Falling back to a safe default."
     echo "1300" # Fallback value
   fi
 }
@@ -124,8 +129,41 @@ find_best_mtu() {
 
 # --- Helpers ---
 find_vpn_iface() { ip -o link show | awk -F': ' '{print $2}' | grep -E "nordlynx|nordtun" | head -n1 || true; }
-apply_iptables() { IFACE="$1"; SRC="${ALLOWLIST_SUBNET:-0.0.0.0/0}"; if [ -n "$IFACE" ]; then log "Applying iptables rules (iface=$IFACE, src=$SRC)..."; iptables -t nat -A POSTROUTING -s "$SRC" -o "$IFACE" -j MASQUERADE || true; iptables -A FORWARD -s "$SRC" -j ACCEPT || true; iptables -A FORWARD -d "$SRC" -j ACCEPT || true; iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true; fi; }
-cleanup_iptables() { IFACE="$1"; SRC="${ALLOWLIST_SUBNET:-0.0.0.0/0}"; iptables -t nat -D POSTROUTING -s "$SRC" -o "$IFACE" -j MASQUERADE 2>/dev/null || true; iptables -D FORWARD -s "$SRC" -j ACCEPT 2>/dev/null || true; iptables -D FORWARD -d "$SRC" -j ACCEPT 2>/dev/null || true; iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true; }
+
+# ==========================================================
+# ===== KORRIGIERTE IPTABLES-HELPER ========================
+# ==========================================================
+apply_iptables() {
+  local IFACE="$1"
+  if [ -z "$IFACE" ]; then return; fi
+  log "Applying iptables rules (iface=$IFACE)..."
+  # Iteriere durch komma-getrennte Subnetze
+  for subnet in ${ALLOWLIST_SUBNET//,/ }; do
+    log "--> Allowing FORWARD and MASQUERADE for subnet: ${subnet}"
+    # -C prÃÂ¼ft, ob die Regel existiert, || fÃÂ¼gt sie nur hinzu, wenn -C fehlschlÃÂ¤gt. Macht das Skript robust gegen Neustarts.
+    iptables -t nat -C POSTROUTING -s "${subnet}" -o "$IFACE" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s "${subnet}" -o "$IFACE" -j MASQUERADE
+    iptables -C FORWARD -s "${subnet}" -j ACCEPT 2>/dev/null || iptables -A FORWARD -s "${subnet}" -j ACCEPT
+    iptables -C FORWARD -d "${subnet}" -j ACCEPT 2>/dev/null || iptables -A FORWARD -d "${subnet}" -j ACCEPT
+  done
+  iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+}
+
+cleanup_iptables() {
+  local IFACE="$1"
+  if [ -z "$IFACE" ]; then return; fi
+  log "Cleaning up iptables rules..."
+  # Iteriere durch komma-getrennte Subnetze
+  for subnet in ${ALLOWLIST_SUBNET//,/ }; do
+    iptables -t nat -D POSTROUTING -s "${subnet}" -o "$IFACE" -j MASQUERADE 2>/dev/null || true
+    iptables -D FORWARD -s "${subnet}" -j ACCEPT 2>/dev/null || true
+    iptables -D FORWARD -d "${subnet}" -j ACCEPT 2>/dev/null || true
+  done
+  iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+}
+# ==========================================================
+# ===== ENDE DER KORREKTUREN ===============================
+# ==========================================================
+
 apply_mtu() { IFACE="$1"; MTU_VAL="$2"; if [ -n "$IFACE" ] && [[ "$MTU_VAL" =~ ^[0-9]+$ ]]; then log "Setting MTU $MTU_VAL on $IFACE..."; ip link set dev "$IFACE" mtu "$MTU_VAL" || true; fi; }
 
 # --- REVISED FUNCTION: Determine MTU ---
@@ -134,7 +172,7 @@ detect_mtu_for_iface() {
   if [ -z "$IFACE" ]; then echo ""; return; fi
   if [ "$VPN_MTU" != "auto" ] && [ -n "${VPN_MTU}" ]; then log "Using configured MTU: ${VPN_MTU}"; echo "${VPN_MTU}"; return; fi
   if [ -n "$MTU_CACHE" ]; then log "Reusing cached MTU value: $MTU_CACHE"; echo "$MTU_CACHE"; return; fi
-  
+
   DETECTED_MTU=$(find_best_mtu)
   MTU_CACHE="$DETECTED_MTU"
   echo "$DETECTED_MTU"
@@ -142,13 +180,13 @@ detect_mtu_for_iface() {
 
 find_best_server() {
   export LC_NUMERIC="C"
-  
+
   debug_log "Fetching country ID for '${VPN_COUNTRY}'..."
   local country_id
   country_id=$(curl -s 'https://api.nordvpn.com/v1/countries' | jq --arg COUNTRY "$VPN_COUNTRY" '.[] | select(.name == $COUNTRY) | .id')
   if [[ -z "$country_id" ]]; then log "Error: Could not find country ID for '${VPN_COUNTRY}'."; return 1; fi
   debug_log "Found country ID: ${country_id}"
-  
+
   local api_group_identifier
   case "${VPN_GROUP}" in
     "p2p") api_group_identifier="legacy_p2p" ;;
@@ -192,10 +230,10 @@ find_best_server() {
   )
 
   if [ -z "$ping_results" ]; then log "Error: Parallel ping could not find any responsive servers."; return 1; fi
-  
+
   local best_server_hostname
   best_server_hostname=$(echo "$ping_results" | sort -n | head -n 1 | awk '{print $2}')
-  
+
   echo "$best_server_hostname" | sed -E 's/\.nordvpn\.com//'
 }
 
@@ -249,7 +287,15 @@ log "Logging in with token..."
 nordvpn login --token "$TOKEN" 2>&1 | grep -v -E "Welcome|By default|To limit" || true
 nordvpn set killswitch "${KILLSWITCH}" || true
 nordvpn set pq "${POST_QUANTUM}" || true
-if [ -n "${ALLOWLIST_SUBNET}" ]; then nordvpn allowlist add subnet "${ALLOWLIST_SUBNET}" || true; fi
+
+# Verarbeitet die komma-getrennte Allowlist
+if [ -n "${ALLOWLIST_SUBNET}" ]; then
+  for subnet in ${ALLOWLIST_SUBNET//,/ }; do
+    log "Adding subnet to allowlist: ${subnet}"
+    nordvpn allowlist add subnet "${subnet}" || true
+  done
+fi
+
 nordvpn set dns 103.86.96.100 103.86.99.100 || true
 
 # --- Connect ---
@@ -258,7 +304,7 @@ do_connect() {
   local connect_target="${VPN_SERVER}"
 
   if [[ "$is_reconnect" == "reconnect" ]]; then log "Reconnect detected. Using default connection method..."; connect_target=""; fi
-  
+
   if [ -n "$connect_target" ]; then
     log "Connecting to server: ${connect_target}..."
     timeout "${CONNECT_TIMEOUT}" nordvpn connect "${connect_target}" &> >(handle_output) || true
@@ -295,6 +341,39 @@ do_connect() {
 
 do_connect
 
+# ==========================================================
+# ===== FINALE FUNKTION: WireGuard Server Bypass ===========
+# ==========================================================
+if [[ "${WIREGUARD_BYPASS,,}" == "on" ]]; then
+  if [ -z "$WIREGUARD_SERVER_IP" ] || [ -z "$WIREGUARD_SUBNET" ]; then
+    log "ERROR: WIREGUARD_BYPASS is on, but WIREGUARD_SERVER_IP or WIREGUARD_SUBNET is not set."
+  else
+    log "WireGuard server bypass enabled. Applying rules for server $WIREGUARD_SERVER_IP and subnet $WIREGUARD_SUBNET..."
+
+    # 1. "Wegbeschreibung" fÃÂ¼r den RÃÂ¼ckweg (fÃÂ¼r den Datenverkehr)
+    if ! ip route show | grep -q "${WIREGUARD_SUBNET} via ${WIREGUARD_SERVER_IP}"; then
+      log "--> Adding route for WireGuard subnet ${WIREGUARD_SUBNET}..."
+      ip route add "${WIREGUARD_SUBNET}" via "${WIREGUARD_SERVER_IP}"
+    else
+      log "--> Route for WireGuard subnet already exists."
+    fi
+
+    # 2. "VIP-Pass" fÃÂ¼r den Killswitch (fÃÂ¼r den Handshake)
+    if ! iptables -t mangle -C PREROUTING -s "$WIREGUARD_SERVER_IP" -j MARK --set-xmark 0xe1f1 2>/dev/null; then
+      log "--> Adding iptables mangle rule for Killswitch bypass..."
+      iptables -t mangle -I PREROUTING 1 -s "$WIREGUARD_SERVER_IP" -j MARK --set-xmark 0xe1f1
+    else
+      log "--> iptables mangle rule for Killswitch bypass already exists."
+    fi
+
+    log "WireGuard bypass rules successfully applied."
+  fi
+fi
+# ==========================================================
+# ===== ENDE DER FINALEN FUNKTION ==========================
+# ==========================================================
+
+
 # --- Start background updater if enabled ---
 if [[ "${VPN_AUTO_CONNECT}" == "best" && "${VPN_BEST_SERVER_CHECK_INTERVAL}" -gt 0 ]]; then
   background_best_server_updater &
@@ -309,19 +388,19 @@ while true; do
   sleep "${CHECK_INTERVAL}"
   if [ "$DEBUG" = "on" ]; then ping_output=$(ping -c 1 -w 3 1.1.1.1 2>&1 || true); if [ -n "$ping_output" ]; then printf '%s\n' "$ping_output" | while IFS= read -r line; do debug_log "Keep-alive ping: $line"; done; else debug_log "Keep-alive ping: FAILED (no output)"; fi; else ping -c 1 -w 3 1.1.1.1 > /dev/null 2>&1 || true; fi
   if ! [ -S /run/nordvpn/nordvpnd.sock ]; then log "Daemon socket missing..."; service nordvpn restart || true; sleep 2; do_connect "reconnect"; LAST_REFRESH=$(date +%s); continue; fi
-  
+
   # --- ADVANCED REFRESH LOGIC ---
-  if [ "${VPN_REFRESH}" -gt 0 ]; then 
+  if [ "${VPN_REFRESH}" -gt 0 ]; then
     NOW=$(date +%s)
-    ELAPSED=$(( (NOW - LAST_REFRESH) / 60 ))
-    if [ "$ELAPSED" -ge "${VPN_REFRESH}" ]; then
+    ELASPED=$(( (NOW - LAST_REFRESH) / 60 ))
+    if [ "$ELASPED" -ge "${VPN_REFRESH}" ]; then
       if [[ "${VPN_AUTO_CONNECT}" == "best" ]]; then
         log "Forced refresh: Finding new best server before disconnecting..."
         best_server_found=$(find_best_server || echo "")
-        
+
         log "Disconnecting from current server..."
         nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
-        
+
         if [[ -n "$best_server_found" ]]; then
           log "New best server found: ${best_server_found}. Connecting..."
           VPN_SERVER="$best_server_found"
@@ -341,12 +420,12 @@ while true; do
   fi
   # --- END ADVANCED REFRESH LOGIC ---
 
-  if [ "$LOG_STATUS_INTERVAL" -gt 0 ]; then NOW=$(date +%s); ELAPSED=$(( (NOW - LAST_STATUS_LOG) / 60 )); if [ "$ELAPSED" -ge "$LOG_STATUS_INTERVAL" ]; then STATUS=$(nordvpn status || true); UPTIME=$(echo "$STATUS" | grep -i "Uptime" | awk -F': ' '{print $2}'); TRANSFER=$(echo "$STATUS" | grep -i "Transfer" | awk -F': ' '{print $2}'); log "Session status - Uptime: ${UPTIME:-unknown}, Transfer: ${TRANSFER:-unknown}"; LAST_STATUS_LOG=$NOW; fi; fi
-  
+  if [ "$LOG_STATUS_INTERVAL" -gt 0 ]; then NOW=$(date +%s); ELASPED=$(( (NOW - LAST_STATUS_LOG) / 60 )); if [ "$ELASPED" -ge "$LOG_STATUS_INTERVAL" ]; then STATUS=$(nordvpn status || true); UPTIME=$(echo "$STATUS" | grep -i "Uptime" | awk -F': ' '{print $2}'); TRANSFER=$(echo "$STATUS" | grep -i "Transfer" | awk -F': ' '{print $2}'); log "Session status - Uptime: ${UPTIME:-unknown}, Transfer: ${TRANSFER:-unknown}"; LAST_STATUS_LOG=$NOW; fi; fi
+
   STATUS=$(nordvpn status || true)
   if ! echo "$STATUS" | grep -q "Status: Connected"; then
     log "VPN not connected -> reconnecting..."
-    
+
     reconnect_server=""
     if [[ "${VPN_AUTO_CONNECT}" == "best" && -s $BEST_SERVER_CACHE_FILE ]]; then
       reconnect_server=$(cat "$BEST_SERVER_CACHE_FILE")
