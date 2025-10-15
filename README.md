@@ -1,5 +1,4 @@
-# NordVPN Gateway Container (v2.0)
-
+# NordVPN Gateway Container
 A stable, self-healing Docker container that turns your host into a **NordVPN-based gateway** — featuring a killswitch, automatic MTU detection, smart reconnects, server optimization, and full support for **internal services or external WireGuard servers**.
 
 ---
