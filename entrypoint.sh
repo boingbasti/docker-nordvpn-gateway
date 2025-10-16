@@ -72,10 +72,12 @@ VPN_GROUP=${VPN_GROUP:-p2p}
 LOG_STATUS_INTERVAL=${LOG_STATUS_INTERVAL:-0}
 CONNECT_TIMEOUT=${CONNECT_TIMEOUT:-60}
 VPN_AUTO_CONNECT=${VPN_AUTO_CONNECT:-off}
-# Neue Defaults fÃÂ¼r WireGuard Support
+# New Defaults for WireGuard Support
 WIREGUARD_BYPASS=${WIREGUARD_BYPASS:-off}
 WIREGUARD_SERVER_IP=${WIREGUARD_SERVER_IP:-}
 WIREGUARD_SUBNET=${WIREGUARD_SUBNET:-}
+# New Defaults for logging hooks
+SHOW_WGHOOKS=${SHOW_WGHOOKS:-off}
 
 
 # MTU cache
@@ -131,16 +133,16 @@ find_best_mtu() {
 find_vpn_iface() { ip -o link show | awk -F': ' '{print $2}' | grep -E "nordlynx|nordtun" | head -n1 || true; }
 
 # ==========================================================
-# ===== KORRIGIERTE IPTABLES-HELPER ========================
+# ===== CORRECTED IPTABLES HELPERS =========================
 # ==========================================================
 apply_iptables() {
   local IFACE="$1"
   if [ -z "$IFACE" ]; then return; fi
   log "Applying iptables rules (iface=$IFACE)..."
-  # Iteriere durch komma-getrennte Subnetze
+  # Iterate through comma-separated subnets
   for subnet in ${ALLOWLIST_SUBNET//,/ }; do
     log "--> Allowing FORWARD and MASQUERADE for subnet: ${subnet}"
-    # -C prÃÂ¼ft, ob die Regel existiert, || fÃÂ¼gt sie nur hinzu, wenn -C fehlschlÃÂ¤gt. Macht das Skript robust gegen Neustarts.
+    # -C checks if the rule exists, || only adds it if -C fails. Makes the script robust against restarts.
     iptables -t nat -C POSTROUTING -s "${subnet}" -o "$IFACE" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s "${subnet}" -o "$IFACE" -j MASQUERADE
     iptables -C FORWARD -s "${subnet}" -j ACCEPT 2>/dev/null || iptables -A FORWARD -s "${subnet}" -j ACCEPT
     iptables -C FORWARD -d "${subnet}" -j ACCEPT 2>/dev/null || iptables -A FORWARD -d "${subnet}" -j ACCEPT
@@ -152,7 +154,7 @@ cleanup_iptables() {
   local IFACE="$1"
   if [ -z "$IFACE" ]; then return; fi
   log "Cleaning up iptables rules..."
-  # Iteriere durch komma-getrennte Subnetze
+  # Iterate through comma-separated subnets
   for subnet in ${ALLOWLIST_SUBNET//,/ }; do
     iptables -t nat -D POSTROUTING -s "${subnet}" -o "$IFACE" -j MASQUERADE 2>/dev/null || true
     iptables -D FORWARD -s "${subnet}" -j ACCEPT 2>/dev/null || true
@@ -161,7 +163,7 @@ cleanup_iptables() {
   iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 }
 # ==========================================================
-# ===== ENDE DER KORREKTUREN ===============================
+# ===== END OF CORRECTIONS =================================
 # ==========================================================
 
 apply_mtu() { IFACE="$1"; MTU_VAL="$2"; if [ -n "$IFACE" ] && [[ "$MTU_VAL" =~ ^[0-9]+$ ]]; then log "Setting MTU $MTU_VAL on $IFACE..."; ip link set dev "$IFACE" mtu "$MTU_VAL" || true; fi; }
@@ -288,7 +290,7 @@ nordvpn login --token "$TOKEN" 2>&1 | grep -v -E "Welcome|By default|To limit" |
 nordvpn set killswitch "${KILLSWITCH}" || true
 nordvpn set pq "${POST_QUANTUM}" || true
 
-# Verarbeitet die komma-getrennte Allowlist
+# Process comma-separated allowlist
 if [ -n "${ALLOWLIST_SUBNET}" ]; then
   for subnet in ${ALLOWLIST_SUBNET//,/ }; do
     log "Adding subnet to allowlist: ${subnet}"
@@ -342,7 +344,7 @@ do_connect() {
 do_connect
 
 # ==========================================================
-# ===== FINALE FUNKTION: WireGuard Server Bypass ===========
+# ===== FINAL FUNCTION: WireGuard Server Bypass ============
 # ==========================================================
 if [[ "${WIREGUARD_BYPASS,,}" == "on" ]]; then
   if [ -z "$WIREGUARD_SERVER_IP" ] || [ -z "$WIREGUARD_SUBNET" ]; then
@@ -350,7 +352,7 @@ if [[ "${WIREGUARD_BYPASS,,}" == "on" ]]; then
   else
     log "WireGuard server bypass enabled. Applying rules for server $WIREGUARD_SERVER_IP and subnet $WIREGUARD_SUBNET..."
 
-    # 1. "Wegbeschreibung" fÃÂ¼r den RÃÂ¼ckweg (fÃÂ¼r den Datenverkehr)
+    # 1. Route for the return path (for data traffic)
     if ! ip route show | grep -q "${WIREGUARD_SUBNET} via ${WIREGUARD_SERVER_IP}"; then
       log "--> Adding route for WireGuard subnet ${WIREGUARD_SUBNET}..."
       ip route add "${WIREGUARD_SUBNET}" via "${WIREGUARD_SERVER_IP}"
@@ -358,7 +360,7 @@ if [[ "${WIREGUARD_BYPASS,,}" == "on" ]]; then
       log "--> Route for WireGuard subnet already exists."
     fi
 
-    # 2. "VIP-Pass" fÃÂ¼r den Killswitch (fÃÂ¼r den Handshake)
+    # 2. "VIP Pass" for the Killswitch (for the handshake)
     if ! iptables -t mangle -C PREROUTING -s "$WIREGUARD_SERVER_IP" -j MARK --set-xmark 0xe1f1 2>/dev/null; then
       log "--> Adding iptables mangle rule for Killswitch bypass..."
       iptables -t mangle -I PREROUTING 1 -s "$WIREGUARD_SERVER_IP" -j MARK --set-xmark 0xe1f1
@@ -370,7 +372,47 @@ if [[ "${WIREGUARD_BYPASS,,}" == "on" ]]; then
   fi
 fi
 # ==========================================================
-# ===== ENDE DER FINALEN FUNKTION ==========================
+# ===== END OF FINAL FUNCTION ==============================
+# ==========================================================
+
+
+# ==========================================================
+# ===== NEW FUNCTION: Log wg-easy Hooks ====================
+# ==========================================================
+if [[ "${SHOW_WGHOOKS,,}" == "on" ]]; then
+    log "--- Recommended wg-easy PostUp/PostDown Hooks ---"
+    GATEWAY_IP=$(ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+    # Extract the first subnet from the allowlist as the LAN subnet
+    LAN_SUBNET=$(echo "$ALLOWLIST_SUBNET" | cut -d',' -f1)
+
+    if [ -z "$GATEWAY_IP" ] || [ -z "$LAN_SUBNET" ] || [ -z "$WIREGUARD_SUBNET" ]; then
+        log "Could not determine all required variables (Gateway IP, LAN Subnet, or WireGuard Subnet). Cannot generate hooks."
+    else
+        # Variant WITH local network access
+        log ""
+        log "--- Variant 1: WITH Local Network Access ---"
+        echo ""
+        log "PostUp:"
+        echo "ip route add 0.0.0.0/1 via ${GATEWAY_IP}; ip route add 128.0.0.0/1 via ${GATEWAY_IP}; iptables -A FORWARD -i wg0 -j ACCEPT; iptables -A FORWARD -o wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -s ${WIREGUARD_SUBNET} -d ${LAN_SUBNET} -o eth0 -j MASQUERADE"
+        echo ""
+        log "PostDown:"
+        echo "ip route del 0.0.0.0/1; ip route del 128.0.0.0/1; iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -s ${WIREGUARD_SUBNET} -d ${LAN_SUBNET} -o eth0 -j MASQUERADE"
+        echo ""
+
+        # Variant WITHOUT local network access
+        log "--- Variant 2: WITHOUT Local Network Access (Internet Only) ---"
+        echo ""
+        log "PostUp:"
+        echo "ip route del default; ip route add default via ${GATEWAY_IP}; iptables -A FORWARD -i wg0 -j ACCEPT; iptables -A FORWARD -o wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE"
+        echo ""
+        log "PostDown:"
+        echo "iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE"
+        echo ""
+    fi
+    log "--- End of recommended hooks ---"
+fi
+# ==========================================================
+# ===== END OF NEW FUNCTION ================================
 # ==========================================================
 
 
