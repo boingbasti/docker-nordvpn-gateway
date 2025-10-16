@@ -1,86 +1,93 @@
 # NordVPN Gateway Container
 
-A stable, self-healing Docker container that turns your host into a **NordVPN-based gateway** — featuring a killswitch, automatic MTU detection, smart reconnects, server optimization, and full support for **internal services or external WireGuard servers**.
+A stable, self-healing, and intelligent Docker container that transforms your host into a secure NordVPN gateway. It is designed to serve as a central, fail-safe internet access point for other containers or your entire LAN.
 
 ---
-## ✨ Features
+## ✨ Core Features
 
-### Secure & Self-Healing
-- Based on the official NordVPN client (`v4.1.1+`)
-- Token-based authentication (recommended via Docker secret)
-- Built-in killswitch prevents leaks when VPN disconnects
-- Automatic recovery on network or VPN failure
-
-### Smart Server Selection
-- `VPN_AUTO_CONNECT=best` finds the fastest server via parallel ping tests
-- Background task periodically re-checks and caches the “Best Server”
-
-### Performance & Stability
-- Automatic MTU detection using ping-based testing
-- MSS clamping for optimal TCP performance
-- Active connection checks (`curl` + `ping`) with robust reconnect logic
-
-### Full Gateway Functionality
-- NAT / MASQUERADE for LAN or Docker services
-- Supports multiple, comma-separated subnets in `ALLOWLIST_SUBNET`
-
-### Extensible
-- Easily attach other containers (e.g., AdGuard, JDownloader, proxies)
-- Full WireGuard integration (via separate macvlan) with an automated, active NordVPN killswitch bypass
+* 🔒 **Secure & Self-Healing**: Uses token authentication (via Docker Secret) and the built-in killswitch. A persistent loop actively monitors the connection, the VPN daemon socket, and external reachability. On failure, it triggers a clean reconnect.
+* ⚡ **Smart Server Selection**: `VPN_AUTO_CONNECT=best` pings recommended servers in parallel and connects to the one with the absolute lowest latency.
+* 🧠 **Proactive Server Caching**: A background task caches the "best" server. If the connection drops, the container reconnects instantly without a new search.
+* 🚀 **Optimized Performance**: Automatically detects the optimal MTU for your connection using a binary ping test to maximize throughput.
+* 🧩 **Advanced WireGuard Bypass**: A core integration that allows an external WireGuard server (e.g., `wg-easy`) to route through the VPN *without* the killswitch blocking its handshake.
 
 ---
-## 🛠 Requirements
+## 🚀 Quick Start: Secure Proxy (No macvlan needed)
 
-A Docker host with:
-- `cap_add: NET_ADMIN` (required)
-- `/dev/net/tun` available
-- (Optional) `cap_add: NET_RAW` for best server auto-detection
-- Valid NordVPN token (recommended: `/run/secrets/nordvpn_token`)
-
----
-## 📦 Environment Variables
-
-| Variable | Default | Description |
-|:---|:---|:---|
-| `VPN_COUNTRY` | `Germany` | Country to connect to |
-| `VPN_GROUP` | `p2p` | Server group (`p2p`, `double_vpn`, `obfuscated`, …) |
-| `VPN_SERVER` | *(unset)* | Specific server (e.g., `de1234.nordvpn.com`) |
-| `VPN_TECHNOLOGY` | `NordLynx` | `NordLynx` or `OpenVPN` |
-| `PROTOCOL` | *(unset)* | OpenVPN only: `udp` or `tcp` |
-| `VPN_AUTO_CONNECT` | `off` | `best` = automatically finds fastest server |
-| `VPN_BEST_SERVER_CHECK_INTERVAL` | `30` | Minutes between best-server checks |
-| `KILLSWITCH` | `on` | Enables NordVPN’s built-in killswitch |
-| `ALLOWLIST_SUBNET` | *(unset)* | One or more comma-separated subnets (e.g., `192.168.1.0/24,10.10.10.0/24`) |
-| `POST_QUANTUM` | `on` | Enables post-quantum protection |
-| `VPN_MTU` | `auto` | MTU autodetect or manual (e.g., `1340`) |
-| `VPN_REFRESH` | `0` | Force reconnect after X minutes (`0` = disabled) |
-| `CHECK_INTERVAL` | `60` | Interval between connection checks |
-| `RETRY_COUNT` | `3` | Retry attempts before reconnect |
-| `RETRY_DELAY` | `2` | Delay between retries |
-| `CONNECT_TIMEOUT` | `30` | Connection timeout (seconds) |
-| `LOG_STATUS_INTERVAL` | `0` | Log VPN status every X minutes (`0` = off) |
-| `DEBUG` | `off` | Enable detailed logs |
-| `WIREGUARD_BYPASS` | `off` | Enable automated rules to allow traffic from an external WireGuard server. |
-| `WIREGUARD_SERVER_IP` | *(unset)* | IP of the WireGuard server (e.g., `192.168.179.229`). Required if `WIREGUARD_BYPASS=on`. |
-| `WIREGUARD_SUBNET` | *(unset)* | Subnet of WireGuard clients (e.g., `10.10.10.0/24`). Required if `WIREGUARD_BYPASS=on`. |
-| `SHOW_WGHOOKS` | `off` | Set to `on` to Show the recommended Wireguard PostUp/PostDown hooks in logs on startup. |
-
----
-## 🚀 Quick Start (macvlan Gateway)
+This is the simplest way to get started. This example creates a SOCKS5 proxy that routes all traffic through the VPN. It requires **no extra network setup**.
 
 ```yaml
 version: "3.9"
+services:
+  vpn:
+    image: boingbasti/nordvpn-gateway:latest
+    container_name: nordvpn
+    cap_add:
+      - NET_ADMIN  # Required for iptables, routing, and MTU adjustment
+    devices:
+      - /dev/net/tun
+    volumes:
+      - ./nordvpn_token.txt:/run/secrets/nordvpn_token:ro
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      - VPN_TECHNOLOGY=NordLynx
+      - VPN_COUNTRY=Germany
+      - VPN_AUTO_CONNECT=best
+      - KILLSWITCH=on
+    restart: unless-stopped
 
+  socks5:
+    image: boingbasti/nordvpn-socks5:latest
+    container_name: nordvpn-socks5
+    network_mode: "service:vpn" # <-- This attaches it to the vpn container
+    depends_on:
+      - vpn
+    environment:
+      - PROXY_PORT=1080
+      - ALLOWED_IPS=192.168.1.0/24 # Your LAN subnet
+    restart: unless-stopped
+```
+
+---
+## 🌐 Recommended Setup: LAN Gateway (macvlan)
+
+To use this container as a gateway for your *entire LAN* (or for complex setups like WireGuard), you need to give it its own IP address using `macvlan`.
+
+### 1. Prerequisite: Create the Macvlan Network
+
+You must create a `macvlan` network on your Docker host *before* running the compose file.
+
+**A. Find your host's network interface:**
+Run `ip addr` on your Docker host. Look for your primary interface name (e.g., `eth0`, `eno1`, `enp3s0`).
+
+**B. Create the Docker network:**
+Run the following command, replacing the **bold** values with your own LAN settings.
+
+```bash
+docker network create -d macvlan \
+  --subnet=**192.168.1.0/24** \
+  --gateway=**192.168.1.1** \
+  -o parent=**eth0** \
+  vpn_gateway_net
+```
+* `vpn_gateway_net` is the name we will use in the compose file.
+
+### 2. Docker Compose (Gateway)
+
+Save this as `docker-compose.yml`. The `vpn` container will now act as a gateway at `192.168.1.100`.
+
+```yaml
+version: "3.9"
 services:
   vpn:
     image: boingbasti/nordvpn-gateway:latest
     container_name: nordvpn
     networks:
-      macvlan:
-        ipv4_address: 192.168.179.100
+      vpn_gateway_net:
+        ipv4_address: 192.168.1.100 # Choose a free IP in your LAN
     cap_add:
       - NET_ADMIN
-      - NET_RAW
+      - NET_RAW    # Required for the 'best server' latency pings
     devices:
       - /dev/net/tun
     volumes:
@@ -88,37 +95,25 @@ services:
       - /etc/localtime:/etc/localtime:ro
     environment:
       - VPN_COUNTRY=Germany
-      - VPN_GROUP=p2p
-      - VPN_TECHNOLOGY=NordLynx
       - VPN_AUTO_CONNECT=best
-      - VPN_MTU=auto
       - KILLSWITCH=on
-      - ALLOWLIST_SUBNET=192.168.179.0/24
+      - ALLOWLIST_SUBNET=192.168.1.0/24 # IMPORTANT: Your LAN subnet
+      - VPN_MTU=auto
     sysctls:
       - net.ipv4.ip_forward=1
     restart: unless-stopped
 
 networks:
-  macvlan:
+  vpn_gateway_net:
     external: true
 ```
 
 ---
-## 🌐 Optional Add-ons
+## 🔌 Optional Add-ons (service:vpn)
 
-### SOCKS5 Proxy
-```yaml
-  socks5:
-    image: boingbasti/nordvpn-socks5:latest
-    container_name: nordvpn-socks5
-    network_mode: "service:vpn"
-    depends_on:
-      - vpn
-    environment:
-      - PROXY_PORT=1080
-      - ALLOWED_IPS=192.168.179.0/24
-    restart: unless-stopped
-```
+Once you have the `vpn` container running, you can attach other services to it using `network_mode: service:vpn`. They will be fully protected by the VPN and killswitch.
+
+(This can be added to *either* compose file from the examples above).
 
 ### HTTP Proxy (Privoxy)
 ```yaml
@@ -131,21 +126,76 @@ networks:
     restart: unless-stopped
 ```
 
----
-## 🧩 WireGuard Integration (`WIREGUARD_BYPASS`)
-
-This feature allows a **dedicated WireGuard server** (e.g., `wg-easy`) to route through the NordVPN gateway — remaining killswitch-protected while still maintaining full LAN access.
-
-> ⚠️ The WireGuard server **must run in its own macvlan container**. Running it in the same network stack as the NordVPN container (`network_mode: service:vpn`) is unstable and not recommended.
-
-### Example `wg-easy` Setup
+### AdGuard Home (DNS)
 ```yaml
+  adguardhome:
+    container_name: nordvpn-adguard
+    image: adguard/adguardhome:latest
+    network_mode: "service:vpn"
+    depends_on:
+      - vpn
+    volumes:
+      - ./adguard-work:/opt/adguardhome/work
+      - ./adguard-config:/opt/adguardhome/conf
+    cap_add:
+      - NET_ADMIN # Required for AdGuard to handle DNS
+    restart: unless-stopped
+```
+
+---
+## 🧩 Advanced Feature: WireGuard Integration
+
+This feature allows a dedicated WireGuard server (e.g., `wg-easy`) to route through the NordVPN gateway, protected by the killswitch while retaining full LAN access.
+
+This setup **requires** the `macvlan` method from the "Recommended Setup" section.
+
+### Example `docker-compose.yml` (Full Stack)
+
+This file includes both the `vpn` gateway and the `wg-easy` server on the `macvlan` network.
+
+```yaml
+version: "3.9"
+services:
+  vpn:
+    image: boingbasti/nordvpn-gateway:latest
+    container_name: nordvpn
+    networks:
+      vpn_gateway_net:
+        ipv4_address: 192.168.1.100 # Gateway's IP
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun
+    volumes:
+      - ./nordvpn_token.txt:/run/secrets/nordvpn_token:ro
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      # --- Basic VPN Settings ---
+      - VPN_COUNTRY=Germany
+      - VPN_AUTO_CONNECT=best
+      - KILLSWITCH=on
+      
+      # --- WireGuard Bypass Variables ---
+      - WIREGUARD_BYPASS=on
+      - WIREGUARD_SERVER_IP=192.168.1.200    # The IP of your wg-easy container
+      - WIREGUARD_SUBNET=10.10.10.0/24         # The client network of wg-easy
+      
+      # --- IMPORTANT: Extend the Allowlist ---
+      # Allow your LAN AND your WG clients to use the VPN
+      - ALLOWLIST_SUBNET=192.168.1.0/24,10.10.10.0/24
+    sysctls:
+      - net.ipv4.ip_forward=1
+    restart: unless-stopped
+
   wg-easy:
     image: ghcr.io/wg-easy/wg-easy:15
     container_name: wg-easy-server
+    depends_on:
+      - vpn
     networks:
-      macvlan:
-        ipv4_address: 192.168.179.229
+      vpn_gateway_net:
+        ipv4_address: 192.168.1.200 # Dedicated IP for the WG server
     volumes:
       - ./wg-easy-config:/etc/wireguard
       - /lib/modules:/lib/modules:ro
@@ -155,53 +205,115 @@ This feature allows a **dedicated WireGuard server** (e.g., `wg-easy`) to route 
     environment:
       - DISABLE_IPV6=true
       - INSECURE=true
+      # Note: PostUp/PostDown hooks must be set INSIDE the wg-easy UI
     sysctls:
       - net.ipv4.ip_forward=1
       - net.ipv4.conf.all.src_valid_mark=1
     restart: unless-stopped
-```
 
-### Enable Bypass in NordVPN Gateway
-```yaml
-    environment:
-      - WIREGUARD_BYPASS=on
-      - WIREGUARD_SERVER_IP=192.168.179.229
-      - WIREGUARD_SUBNET=10.10.10.0/24
+networks:
+  vpn_gateway_net:
+    external: true
 ```
 
 ---
-## 📜 Displaying wg-easy Hooks
+## 📦 Configuration Reference
 
-To easily get the correct `PostUp` / `PostDown` commands for your setup, set the following variable on the NordVPN container:
+### 🔑 Authentication
+* `NORDVPN_TOKEN`
+    * **Required**: (No default). Your login token. Alternatively read from `/run/secrets/nordvpn_token`, which is the preferred method.
 
-```yaml
-    environment:
-      - SHOW_WGHOOKS=on
-```
+### 🌐 Basic Connection
+* `VPN_COUNTRY`
+    * **Default**: `Germany`
+* `VPN_GROUP`
+    * **Default**: `p2p`
+* `VPN_SERVER`
+    * **Default**: (empty)
+    * **Note**: If set (e.g., `de1234`), this overrides `VPN_COUNTRY` and `VPN_GROUP`.
+* `VPN_TECHNOLOGY`
+    * **Default**: `NordLynx`
+    * **Options**: `NordLynx` or `OpenVPN`.
+* `PROTOCOL`
+    * **Default**: (empty)
+    * **Dependency**: Only effective if `VPN_TECHNOLOGY=OpenVPN` is set.
+    * **Options**: `udp` or `tcp`.
 
-The container will print both “Internet + LAN Access” and “Internet Only” hook examples to the logs on startup.
+### ⚡ Smart Server Selection
+* `VPN_AUTO_CONNECT`
+    * **Default**: `off`
+    * **Function**: Set to `best` to enable latency-based server optimization.
+* `VPN_BEST_SERVER_CHECK_INTERVAL`
+    * **Default**: `30`
+    * **Dependency**: Only effective if `VPN_AUTO_CONNECT=best`.
+    * **Function**: Interval in *minutes* for the background task to find and cache a new best server.
+
+### 🛡️ Network, Gateway & Killswitch
+* `KILLSWITCH`
+    * **Default**: `on`
+    * **Function**: Enables the NordVPN killswitch.
+* `POST_QUANTUM`
+    * **Default**: `on`
+    * **Function**: Enables Post-Quantum encryption.
+* `ALLOWLIST_SUBNET`
+    * **Default**: (empty)
+    * **Function**: **Crucial variable!** Defines which subnets are allowed to route through the VPN (via NAT/MASQUERADE).
+    * **Example**: `192.168.1.0/24` (for your LAN) or `192.168.1.0/24,10.10.10.0/24` (for LAN and a Docker network).
+* `VPN_MTU`
+    * **Default**: `auto`
+    * **Function**: `auto` performs automatic MTU detection. You can also set a fixed value (e.g., `1360`).
+
+### 🧩 WireGuard Bypass Integration
+* `WIREGUARD_BYPASS`
+    * **Default**: `off`
+    * **Function**: Set to `on` to enable the special routing and `iptables` rules for the killswitch bypass.
+* `WIREGUARDBYPASS`
+    * **Default**: (empty)
+    * **Dependency**: **REQUIRED** if `WIREGUARD_BYPASS=on`.
+    * **Function**: The (macvlan) IP address of your external WireGuard server (e.g., `192.168.1.200`).
+* `WIREGUARD_SUBNET`
+    * **Default**: (empty)
+    * **Dependency**: **REQUIRED** if `WIREGUARD_BYPASS=on`.
+    * **Function**: The subnet used by your WireGuard clients (e.g., `10.10.10.0/24`).
+* `SHOW_WGHOOKS`
+    * **Default**: `off`
+    * **Function**: A helper utility. Set to `on` to print the recommended `PostUp`/`PostDown` hooks for `wg-easy` to the log on startup.
+
+### ⚙️ Logging & Maintenance
+* `DEBUG`
+    * **Default**: `off`
+    * **Function**: Set to `on` for extremely verbose logs.
+* `CHECK_INTERVAL`
+    * **Default**: `60`
+    * **Function**: Interval in *seconds* for the "keep-alive" ping check.
+* `RETRY_COUNT`
+    * **Default**: `2`
+    * **Function**: Number of `curl` attempts to verify external connectivity before reconnecting.
+* `RETRY_DELAY`
+    * **Default**: `2`
+    * **Function**: Delay in *seconds* between `curl` attempts.
+* `VPN_REFRESH`
+    * **Default**: `0`
+    * **Function**: Forces a reconnection every X *minutes* (0 = disabled).
+* `LOG_STATUS_INTERVAL`
+    * **Default**: `0`
+    * **Function**: Logs the `nordvpn status` (Uptime, Transfer) every X *minutes* (0 = disabled).
+* `CONNECT_TIMEOUT`
+    * **Default**: `60`
+    * **Function**: Maximum time in *seconds* the `nordvpn connect` command is allowed to run.
 
 ---
 ## 🔍 Troubleshooting
 
 | Problem | Cause | Solution |
-|:--|:--|:--|
-| No Internet despite VPN | MTU too high | `VPN_MTU=auto` should work. If not, try `1360`. |
-| No LAN access from WG | Asymmetric routing | Use `PostUp` hook with `MASQUERADE`. |
-| No Internet from WG | Double NAT | Use `PostUp` hook without `MASQUERADE` and check `ALLOWLIST_SUBNET`. |
-| No Handshake | Firewall / Killswitch | Ensure `WIREGUARD_BYPASS=on` and correct `WIREGUARD_SERVER_IP`. |
-| `VPN_AUTO_CONNECT=best` hangs | Missing `NET_RAW` | Add `cap_add: NET_RAW`. |
-
----
-## 🧠 How It Works
-
-1. The container starts NordVPN and establishes a secure connection.  
-2. `iptables` rules and `ip rule` policies enforce a strict killswitch.  
-3. When `WIREGUARD_BYPASS` is enabled, the container automatically adds routes and exceptions for the WireGuard server.  
-4. The `wg-easy` PostUp script configures split-tunneling, routing LAN and Internet traffic intelligently.  
+| :--- | :--- | :--- |
+| Container won't start (network error) | `macvlan` network is missing or misconfigured. | Run the `docker network create` command from the "Prerequisite" step. |
+| No internet despite VPN | MTU is too high. | Use `VPN_MTU=auto` or set manually to `1360`. |
+| `VPN_AUTO_CONNECT=best` hangs | Missing `NET_RAW` capability. | Add `cap_add: NET_RAW` to the `vpn` service. |
+| WG client won't connect (no handshake) | Firewall / Killswitch is blocking. | Set `WIREGUARD_BYPASS=on` and check `WIREGUARD_SERVER_IP`. |
+| No LAN access from WG client | Asymmetric routing. | Use the `PostUp` hook (from `SHOW_WGHOOKS`) with MASQUERADE. |
 
 ---
 ## 📎 Links
-
-- 🐳 **Docker Hub**: [boingbasti/nordvpn-gateway](https://hub.docker.com/r/boingbasti/nordvpn-gateway)  
-- 💻 **GitHub**: [boingbasti/docker-nordvpn-gateway](https://github.com/boingbasti/docker-nordvpn-gateway)
+* 🐳 **Docker Hub**: [boingbasti/nordvpn-gateway](https://hub.docker.com/r/boingbasti/nordvpn-gateway)
+* 💻 **GitHub**: [boingbasti/docker-nordvpn-gateway](https://github.com/boingbasti/docker-nordvpn-gateway)
