@@ -58,11 +58,70 @@ services:
 ```
 
 ---
+## 🌐 Recommended Setup: LAN Gateway (macvlan)
+
+To use this container as a gateway for your *entire LAN* (or for complex setups like WireGuard), you need to give it its own IP address using `macvlan`.
+
+### 1. Prerequisite: Create the Macvlan Network
+
+You must create a `macvlan` network on your Docker host *before* running the compose file.
+
+**A. Find your host's network interface:**
+Run `ip addr` on your Docker host. Look for your primary interface name (e.g., `eth0`, `eno1`, `enp3s0`).
+
+**B. Create the Docker network:**
+Run the following command, replacing the **bold** values with your own LAN settings.
+
+```bash
+docker network create -d macvlan \
+  --subnet=**192.168.1.0/24** \
+  --gateway=**192.168.1.1** \
+  -o parent=**eth0** \
+  vpn_gateway_net
+```
+* `vpn_gateway_net` is the name we will use in the compose file.
+
+### 2. Docker Compose (Gateway)
+
+Save this as `docker-compose.yml`. The `vpn` container will now act as a gateway at `192.168.1.100`.
+
+```yaml
+version: "3.9"
+services:
+  vpn:
+    image: boingbasti/nordvpn-gateway:latest
+    container_name: nordvpn
+    networks:
+      vpn_gateway_net:
+        ipv4_address: 192.168.1.100 # Choose a free IP in your LAN
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW    # Required for 'best server' latency pings
+    devices:
+      - /dev/net/tun
+    volumes:
+      - ./nordvpn_token.txt:/run/secrets/nordvpn_token:ro
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      - VPN_COUNTRY=Germany
+      - VPN_AUTO_CONNECT=best
+      - KILLSWITCH=on
+      - ALLOWLIST_SUBNET=192.168.1.0/24 # IMPORTANT: Your LAN subnet
+      - VPN_MTU=auto
+    sysctls:
+      - net.ipv4.ip_forward=1
+    restart: unless-stopped
+
+networks:
+  vpn_gateway_net:
+    external: true
+```
+
+---
 ## 📦 Configuration Reference
 
 ### 🔑 Authentication
-- **`NORDVPN_TOKEN`** — *(required)*  
-  Your NordVPN service token.  
+- **`NORDVPN_TOKEN`** — *(required)* Your NordVPN service token.  
   Preferred method: mount as Docker Secret at `/run/secrets/nordvpn_token`.
 
 ### 🌐 Basic Connection
