@@ -267,7 +267,7 @@ networks:
 * `WIREGUARD_BYPASS`
     * **Default**: `off`
     * **Function**: Set to `on` to enable the special routing and `iptables` rules for the killswitch bypass.
-* `WIREGUARDBYPASS`
+* `WIREGUARD_SERVER`
     * **Default**: (empty)
     * **Dependency**: **REQUIRED** if `WIREGUARD_BYPASS=on`.
     * **Function**: The (macvlan) IP address of your external WireGuard server (e.g., `192.168.1.200`).
