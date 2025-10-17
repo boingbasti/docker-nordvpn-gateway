@@ -17,7 +17,8 @@ It is designed to serve as a central, fail-safe internet access point for other 
 
 * 🚀 **Optimized Performance** — Automatically detects the optimal MTU for your connection using a binary ping test to maximize throughput.
 
-* 🧩 **Advanced WireGuard Bypass** — Allows an external WireGuard server (e.g. `wg-easy`) to route through the VPN *without* the killswitch blocking its handshake.
+* 🧩 **Advanced WireGuard Bypass** — Allows an external WireGuard server (e.g. `wg-easy`) to route through the VPN *without* the killswitch blocking its handshake.  
+  ⚠️ **Note:** WireGuard bypass requires the container to run in a `macvlan` network — it will not work in `network_mode: service:vpn`.
 
 ---
 ## 🚀 Quick Start: Secure Proxy (no macvlan needed)
@@ -111,108 +112,6 @@ networks:
 ```
 
 ---
-## 🔌 Optional Add-ons (`network_mode: service:vpn`)
-
-Once the VPN container is running, other services can attach directly to it for a fully protected network stack.
-
-### HTTP Proxy (Privoxy)
-
-```yaml
-  http-proxy:
-    image: boingbasti/nordvpn-privoxy:latest
-    container_name: nordvpn-privoxy
-    network_mode: "service:vpn"
-    depends_on:
-      - vpn
-    restart: unless-stopped
-```
-
-### AdGuard Home (DNS)
-
-```yaml
-  adguardhome:
-    container_name: nordvpn-adguard
-    image: adguard/adguardhome:latest
-    network_mode: "service:vpn"
-    depends_on:
-      - vpn
-    volumes:
-      - ./adguard-work:/opt/adguardhome/work
-      - ./adguard-config:/opt/adguardhome/conf
-    cap_add:
-      - NET_ADMIN
-    restart: unless-stopped
-```
-
----
-## 🧩 Advanced Feature: WireGuard Integration
-
-Allows a dedicated WireGuard server (e.g. `wg-easy`) to route through the NordVPN gateway —  
-protected by the killswitch while retaining full LAN access.
-
-Requires the **macvlan setup** from above.
-
-```yaml
-version: "3.9"
-services:
-  vpn:
-    image: boingbasti/nordvpn-gateway:latest
-    container_name: nordvpn
-    networks:
-      vpn_gateway_net:
-        ipv4_address: 192.168.1.100
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
-    devices:
-      - /dev/net/tun
-    volumes:
-      - ./nordvpn_token.txt:/run/secrets/nordvpn_token:ro
-      - /etc/localtime:/etc/localtime:ro
-    environment:
-      - VPN_COUNTRY=Germany
-      - VPN_AUTO_CONNECT=best
-      - KILLSWITCH=on
-
-      # --- WireGuard Bypass ---
-      - WIREGUARD_BYPASS=on
-      - WIREGUARD_SERVER_IP=192.168.1.200
-      - WIREGUARD_SUBNET=10.10.10.0/24
-
-      # --- Extend Allowlist ---
-      - ALLOWLIST_SUBNET=192.168.1.0/24,10.10.10.0/24
-    sysctls:
-      - net.ipv4.ip_forward=1
-    restart: unless-stopped
-
-  wg-easy:
-    image: ghcr.io/wg-easy/wg-easy:15
-    container_name: wg-easy-server
-    depends_on:
-      - vpn
-    networks:
-      vpn_gateway_net:
-        ipv4_address: 192.168.1.200
-    volumes:
-      - ./wg-easy-config:/etc/wireguard
-      - /lib/modules:/lib/modules:ro
-    cap_add:
-      - NET_ADMIN
-      - SYS_MODULE
-    environment:
-      - DISABLE_IPV6=true
-      - INSECURE=true
-    sysctls:
-      - net.ipv4.ip_forward=1
-      - net.ipv4.conf.all.src_valid_mark=1
-    restart: unless-stopped
-
-networks:
-  vpn_gateway_net:
-    external: true
-```
-
----
 ## 📦 Configuration Reference
 
 ### 🔑 Authentication
@@ -232,13 +131,16 @@ networks:
 
 ### ⚡ Smart Server Selection
 - `VPN_AUTO_CONNECT` — set to `best` for latency-based optimization  
-- `VPN_BEST_SERVER_CHECK_INTERVAL` — minutes between background best-server updates (default `30`)
+- `VPN_BEST_SERVER_CHECK_INTERVAL` — minutes between background best-server updates (default `30`).  
+  *(Value in minutes; only active when `VPN_AUTO_CONNECT=best` is set.)*
 
 ### 🛡️ Network, Gateway & MTU
 - `ALLOWLIST_SUBNET` — subnets allowed to use the VPN (e.g. `192.168.1.0/24,10.10.10.0/24`)  
 - `VPN_MTU` — `auto` *(default)* performs automatic MTU detection, or specify fixed value (e.g. `1360`)
 
 ### 🧩 WireGuard Bypass Integration
+⚠️ **Requires macvlan setup. Not supported in `service:vpn` mode.**
+
 - `WIREGUARD_BYPASS` — enables routing bypass for an external WG server  
 - `WIREGUARD_SERVER_IP` — WG server IP (e.g. `192.168.1.200`)  
 - `WIREGUARD_SUBNET` — subnet of WG clients (e.g. `10.10.10.0/24`)  
@@ -249,10 +151,11 @@ networks:
 - `CHECK_INTERVAL` — seconds between health checks (default `60`)  
 - `RETRY_COUNT` — retries before reconnect (default `2`)  
 - `RETRY_DELAY` — seconds between retries (default `2`)  
-- `VPN_REFRESH` — reconnect every X minutes (0 = disabled)  
-- `LOG_STATUS_INTERVAL` — minutes between status logs (0 = disabled)
+- `VPN_REFRESH` — reconnect every X *minutes* (default `0` = disabled)  
+- `LOG_STATUS_INTERVAL` — minutes between status logs (default `0` = disabled)
 
 ---
+
 ## 🔍 Troubleshooting
 
 | Problem | Cause | Solution |
@@ -264,6 +167,7 @@ networks:
 | No LAN access from WG clients | Asymmetric routing | Use MASQUERADE in PostUp hook (from `SHOW_WGHOOKS`) |
 
 ---
+
 ## 📎 Links
 
 - 🐳 **Docker Hub:** [boingbasti/nordvpn-gateway](https://hub.docker.com/r/boingbasti/nordvpn-gateway)  
