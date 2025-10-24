@@ -37,7 +37,15 @@ cleanup() {
     log "Cleaning up iptables rules before exit..."
     cleanup_iptables "$IFACE"
   fi
+
+  log "Disconnecting from NordVPN..."
   nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
+
+  # --- DAS IST DIE ENTSCHEIDENDE NEUE ZEILE ---
+  log "Stopping NordVPN service daemon..."
+  service nordvpn stop || true
+
+  log "Cleanup complete. Exiting."
   exit 0
 }
 trap cleanup SIGTERM SIGINT
@@ -141,7 +149,8 @@ apply_iptables() {
   log "Applying iptables rules (iface=$IFACE)..."
   # Iterate through comma-separated subnets
   for subnet in ${ALLOWLIST_SUBNET//,/ }; do
-    log "--> Allowing FORWARD and MASQUERADE for subnet: ${subnet}"
+    # CHANGED log to debug_log
+    debug_log "--> Allowing FORWARD and MASQUERADE for subnet: ${subnet}"
     # -C checks if the rule exists, || only adds it if -C fails. Makes the script robust against restarts.
     iptables -t nat -C POSTROUTING -s "${subnet}" -o "$IFACE" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s "${subnet}" -o "$IFACE" -j MASQUERADE
     iptables -C FORWARD -s "${subnet}" -j ACCEPT 2>/dev/null || iptables -A FORWARD -s "${subnet}" -j ACCEPT
@@ -276,11 +285,51 @@ if [[ "${VPN_AUTO_CONNECT}" == "best" && -z "${VPN_SERVER}" ]]; then
   fi
 fi
 
+# ==========================================================
+# ===== ROBUST DAEMON START BLOCK ==========================
+# ==========================================================
 service nordvpn start || true
 sleep 2
-log "Waiting for daemon socket..."
+# CHANGED log to debug_log
+debug_log "Waiting for daemon socket file..."
 for i in {1..15}; do [ -S /run/nordvpn/nordvpnd.sock ] && break; sleep 1; done
-log "Daemon socket is available."
+
+if ! [ -S /run/nordvpn/nordvpnd.sock ]; then
+  log "ERROR: Daemon socket file (/run/nordvpn/nordvpnd.sock) did not appear after 15 seconds."
+  [ -f /var/log/nordvpn/daemon.log ] && log "Daemon Log:" && tail /var/log/nordvpn/daemon.log
+  exit 1
+fi
+
+# CHANGED log to debug_log
+debug_log "Daemon socket is available. Waiting for service to respond..."
+# NEW, CRITICAL LOOP:
+for i in {1..15}; do
+  if nordvpn status &> /dev/null; then
+    # CHANGED log to debug_log
+    debug_log "Daemon service is responsive."
+    break
+  fi
+  sleep 1
+done
+
+if ! nordvpn status &> /dev/null; then
+    log "ERROR: Daemon service failed to respond after 15 seconds."
+    [ -f /var/log/nordvpn/daemon.log ] && log "Daemon Log:" && tail /var/log/nordvpn/daemon.log
+    exit 1
+fi
+# ==========================================================
+# ===== END OF ROBUST DAEMON START BLOCK ===================
+# ==========================================================
+
+# CHANGED log to debug_log
+debug_log "Daemon service is responsive."
+
+# --- ADDED BLOCK ---
+# CHANGED log to debug_log
+debug_log "Ensuring clean state: Forcing disconnect..."
+nordvpn disconnect || true # || true fÃ¤ngt Fehler ab, falls nicht verbunden
+sleep 1 # Kurze Pause geben
+# --- END ADDED BLOCK ---
 
 nordvpn set analytics disabled || true
 nordvpn set technology "${VPN_TECHNOLOGY}" || true
@@ -354,18 +403,22 @@ if [[ "${WIREGUARD_BYPASS,,}" == "on" ]]; then
 
     # 1. Route for the return path (for data traffic)
     if ! ip route show | grep -q "${WIREGUARD_SUBNET} via ${WIREGUARD_SERVER_IP}"; then
-      log "--> Adding route for WireGuard subnet ${WIREGUARD_SUBNET}..."
+      # CHANGED log to debug_log
+      debug_log "--> Adding route for WireGuard subnet ${WIREGUARD_SUBNET}..."
       ip route add "${WIREGUARD_SUBNET}" via "${WIREGUARD_SERVER_IP}"
     else
-      log "--> Route for WireGuard subnet already exists."
+      # CHANGED log to debug_log
+      debug_log "--> Route for WireGuard subnet already exists."
     fi
 
     # 2. "VIP Pass" for the Killswitch (for the handshake)
     if ! iptables -t mangle -C PREROUTING -s "$WIREGUARD_SERVER_IP" -j MARK --set-xmark 0xe1f1 2>/dev/null; then
-      log "--> Adding iptables mangle rule for Killswitch bypass..."
+      # CHANGED log to debug_log
+      debug_log "--> Adding iptables mangle rule for Killswitch bypass..."
       iptables -t mangle -I PREROUTING 1 -s "$WIREGUARD_SERVER_IP" -j MARK --set-xmark 0xe1f1
     else
-      log "--> iptables mangle rule for Killswitch bypass already exists."
+      # CHANGED log to debug_log
+      debug_log "--> iptables mangle rule for Killswitch bypass already exists."
     fi
 
     log "WireGuard bypass rules successfully applied."
