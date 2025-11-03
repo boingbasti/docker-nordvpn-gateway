@@ -27,11 +27,14 @@ handle_output() {
 
 cleanup() {
   log "Signal received, shutting down..."
+  
   # Kill background updater if it exists
   if [ -n "${updater_pid-}" ] && ps -p "$updater_pid" > /dev/null; then
     log "Stopping background server updater (PID: $updater_pid)..."
     kill "$updater_pid"
   fi
+  
+  # Cleanup iptables
   IFACE=$(find_vpn_iface)
   if [ -n "$IFACE" ]; then
     log "Cleaning up iptables rules before exit..."
@@ -39,11 +42,33 @@ cleanup() {
   fi
 
   log "Disconnecting from NordVPN..."
-  nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
+  nordvpn disconnect &> /dev/null || true
 
-  # --- DAS IST DIE ENTSCHEIDENDE NEUE ZEILE ---
-  log "Stopping NordVPN service daemon..."
-  service nordvpn stop || true
+  # --- ROBUSTER DAEMON STOP ---
+  log "Stopping NordVPN service daemon (nordvpnd)..."
+  
+  # 1. Versuche es hÃ¶flich mit dem Service-Befehl
+  service nordvpn stop &> /dev/null || true
+  sleep 2
+
+  # 2. PrÃ¼fe, ob der Prozess noch lÃ¤uft
+  if pgrep -x "nordvpnd" > /dev/null; then
+    log "Daemon is still running. Sending SIGTERM..."
+    # 3. Sende SIGTERM (hÃ¶fliches Beenden) an den Prozess
+    pkill -TERM nordvpnd || true
+    sleep 3
+  fi
+
+  # 4. Letzte PrÃ¼fung
+  if pgrep -x "nordvpnd" > /dev/null; then
+    log "Daemon did not respond to SIGTERM. Sending SIGKILL (force)..."
+    # 5. Sende SIGKILL (brutales Beenden)
+    pkill -9 nordvpnd || true
+    sleep 1
+  fi
+  
+  log "NordVPN daemon stopped."
+  # --- ENDE ROBUSTER STOP ---
 
   log "Cleanup complete. Exiting."
   exit 0
@@ -327,7 +352,7 @@ debug_log "Daemon service is responsive."
 # --- ADDED BLOCK ---
 # CHANGED log to debug_log
 debug_log "Ensuring clean state: Forcing disconnect..."
-nordvpn disconnect || true # || true fÃ¤ngt Fehler ab, falls nicht verbunden
+nordvpn disconnect &> /dev/null || true # Output unterdrÃ¼ckt und Fehler abgefangen
 sleep 1 # Kurze Pause geben
 # --- END ADDED BLOCK ---
 
@@ -375,7 +400,12 @@ do_connect() {
 
   local IFACE
   for i in {1..5}; do IFACE=$(find_vpn_iface); [ -n "$IFACE" ] && break; sleep 1; done
+  
+  # --- ADDED PAUSE BLOCK ---
   if [ -n "$IFACE" ]; then
+    log "VPN Interface $IFACE found. Waiting a few seconds for stability..."
+    sleep 5 # 5 Sekunden Pause, um dem NordVPN Client Zeit zum Stabilisieren zu geben
+  # --- END PAUSE BLOCK ---
     cleanup_iptables "$IFACE"
     apply_iptables "$IFACE"
     local DETECTED_MTU
@@ -384,6 +414,12 @@ do_connect() {
   else
     log "WARNING: No VPN interface found after connect."
   fi
+
+  # --- MODIFIED DNS BLOCK ---
+  log "Forcing NordVPN DNS in resolv.conf for stack stability..."
+  echo "nameserver 103.86.96.100" > /etc/resolv.conf
+  echo "nameserver 103.86.99.100" >> /etc/resolv.conf
+  # --- END MODIFIED BLOCK ---
 
   local VPN_IP
   VPN_IP=$(curl -s https://ipinfo.io/ip || echo "unknown")
