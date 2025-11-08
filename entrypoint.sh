@@ -28,6 +28,17 @@ handle_output() {
 cleanup() {
   log "Signal received, shutting down..."
   
+  # --- FLUSH CONNTRACK ---
+  # Clear the connection tracking table to remove stale entries
+  # that might cause issues (e.g., with wg-easy) after a reconnect.
+  log "INFO: Flushing connection tracking table (conntrack)..."
+  if command -v conntrack >/dev/null; then
+      conntrack -F
+  else
+      log "WARN: conntrack command not found. Skipping flush."
+  fi
+  # --- END FLUSH CONNTRACK ---
+
   # Kill background updater if it exists
   if [ -n "${updater_pid-}" ] && ps -p "$updater_pid" > /dev/null; then
     log "Stopping background server updater (PID: $updater_pid)..."
@@ -44,31 +55,31 @@ cleanup() {
   log "Disconnecting from NordVPN..."
   nordvpn disconnect &> /dev/null || true
 
-  # --- ROBUSTER DAEMON STOP ---
+  # --- ROBUST DAEMON STOP ---
   log "Stopping NordVPN service daemon (nordvpnd)..."
   
-  # 1. Versuche es hÃ¶flich mit dem Service-Befehl
+  # 1. Try a graceful service stop
   service nordvpn stop &> /dev/null || true
   sleep 2
 
-  # 2. PrÃ¼fe, ob der Prozess noch lÃ¤uft
+  # 2. Check if the process is still running
   if pgrep -x "nordvpnd" > /dev/null; then
     log "Daemon is still running. Sending SIGTERM..."
-    # 3. Sende SIGTERM (hÃ¶fliches Beenden) an den Prozess
+    # 3. Send SIGTERM (graceful kill)
     pkill -TERM nordvpnd || true
     sleep 3
   fi
 
-  # 4. Letzte PrÃ¼fung
+  # 4. Final check
   if pgrep -x "nordvpnd" > /dev/null; then
     log "Daemon did not respond to SIGTERM. Sending SIGKILL (force)..."
-    # 5. Sende SIGKILL (brutales Beenden)
+    # 5. Send SIGKILL (forceful kill)
     pkill -9 nordvpnd || true
     sleep 1
   fi
   
   log "NordVPN daemon stopped."
-  # --- ENDE ROBUSTER STOP ---
+  # --- END ROBUST DAEMON STOP ---
 
   log "Cleanup complete. Exiting."
   exit 0
@@ -105,11 +116,11 @@ VPN_GROUP=${VPN_GROUP:-p2p}
 LOG_STATUS_INTERVAL=${LOG_STATUS_INTERVAL:-0}
 CONNECT_TIMEOUT=${CONNECT_TIMEOUT:-60}
 VPN_AUTO_CONNECT=${VPN_AUTO_CONNECT:-off}
-# New Defaults for WireGuard Support
+# Defaults for WireGuard Support
 WIREGUARD_BYPASS=${WIREGUARD_BYPASS:-off}
 WIREGUARD_SERVER_IP=${WIREGUARD_SERVER_IP:-}
 WIREGUARD_SUBNET=${WIREGUARD_SUBNET:-}
-# New Defaults for logging hooks
+# Defaults for logging hooks
 SHOW_WGHOOKS=${SHOW_WGHOOKS:-off}
 
 
@@ -117,7 +128,7 @@ SHOW_WGHOOKS=${SHOW_WGHOOKS:-off}
 MTU_CACHE=""
 BEST_SERVER_CACHE_FILE="/tmp/best_server.txt"
 
-# --- NEW FUNCTION: Determine MTU via Ping Test ---
+# --- Function: Determine MTU via Ping Test ---
 find_best_mtu() {
   local TARGET_HOST="1.1.1.1"
   local LOWER_BOUND=1300
@@ -165,16 +176,13 @@ find_best_mtu() {
 # --- Helpers ---
 find_vpn_iface() { ip -o link show | awk -F': ' '{print $2}' | grep -E "nordlynx|nordtun" | head -n1 || true; }
 
-# ==========================================================
-# ===== CORRECTED IPTABLES HELPERS =========================
-# ==========================================================
+# --- IPTables Helpers ---
 apply_iptables() {
   local IFACE="$1"
   if [ -z "$IFACE" ]; then return; fi
   log "Applying iptables rules (iface=$IFACE)..."
   # Iterate through comma-separated subnets
   for subnet in ${ALLOWLIST_SUBNET//,/ }; do
-    # CHANGED log to debug_log
     debug_log "--> Allowing FORWARD and MASQUERADE for subnet: ${subnet}"
     # -C checks if the rule exists, || only adds it if -C fails. Makes the script robust against restarts.
     iptables -t nat -C POSTROUTING -s "${subnet}" -o "$IFACE" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s "${subnet}" -o "$IFACE" -j MASQUERADE
@@ -196,13 +204,44 @@ cleanup_iptables() {
   done
   iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 }
-# ==========================================================
-# ===== END OF CORRECTIONS =================================
-# ==========================================================
+# --- End IPTables Helpers ---
+
+# --- Funktion: WireGuard Server Bypass ---
+apply_wg_bypass_rules() {
+  if [[ "${WIREGUARD_BYPASS,,}" == "on" ]]; then
+    if [ -z "$WIREGUARD_SERVER_IP" ] || [ -z "$WIREGUARD_SUBNET" ]; then
+      log "ERROR: WIREGUARD_BYPASS is on, but WIREGUARD_SERVER_IP or WIREGUARD_SUBNET is not set."
+    else
+      log "WireGuard server bypass enabled. Re-applying rules for server $WIREGUARD_SERVER_IP and subnet $WIREGUARD_SUBNET..."
+
+      # 1. Route for the return path (for data traffic)
+      if ! ip route show | grep -q "${WIREGUARD_SUBNET} via ${WIREGUARD_SERVER_IP}"; then
+        debug_log "--> Adding route for WireGuard subnet ${WIREGUARD_SUBNET}..."
+        ip route add "${WIREGUARD_SUBNET}" via "${WIREGUARD_SERVER_IP}"
+      else
+        debug_log "--> Route for WireGuard subnet already exists."
+      fi
+
+      # --- KORRIGIERTER BLOCK: Robuste "Delete-then-Add" Logik ---
+      # 2. "VIP Pass" for the Killswitch (for the handshake)
+      debug_log "--> (Re)applying iptables mangle rule for Killswitch bypass..."
+      
+      # Try to delete the rule, ignore errors if it doesn't exist
+      iptables -t mangle -D PREROUTING -s "$WIREGUARD_SERVER_IP" -j MARK --set-xmark 0xe1f1 2>/dev/null || true
+      
+      # Insert the rule at the top of the chain
+      iptables -t mangle -I PREROUTING 1 -s "$WIREGUARD_SERVER_IP" -j MARK --set-xmark 0xe1f1
+      # --- ENDE KORRIGIERTER BLOCK ---
+
+      log "WireGuard bypass rules successfully applied."
+    fi
+  fi
+}
+# --- ENDE FUNKTION ---
 
 apply_mtu() { IFACE="$1"; MTU_VAL="$2"; if [ -n "$IFACE" ] && [[ "$MTU_VAL" =~ ^[0-9]+$ ]]; then log "Setting MTU $MTU_VAL on $IFACE..."; ip link set dev "$IFACE" mtu "$MTU_VAL" || true; fi; }
 
-# --- REVISED FUNCTION: Determine MTU ---
+# --- Function: Determine MTU ---
 detect_mtu_for_iface() {
   IFACE="$1"
   if [ -z "$IFACE" ]; then echo ""; return; fi
@@ -310,12 +349,9 @@ if [[ "${VPN_AUTO_CONNECT}" == "best" && -z "${VPN_SERVER}" ]]; then
   fi
 fi
 
-# ==========================================================
-# ===== ROBUST DAEMON START BLOCK ==========================
-# ==========================================================
+# --- Robust Daemon Start ---
 service nordvpn start || true
 sleep 2
-# CHANGED log to debug_log
 debug_log "Waiting for daemon socket file..."
 for i in {1..15}; do [ -S /run/nordvpn/nordvpnd.sock ] && break; sleep 1; done
 
@@ -325,12 +361,9 @@ if ! [ -S /run/nordvpn/nordvpnd.sock ]; then
   exit 1
 fi
 
-# CHANGED log to debug_log
 debug_log "Daemon socket is available. Waiting for service to respond..."
-# NEW, CRITICAL LOOP:
 for i in {1..15}; do
   if nordvpn status &> /dev/null; then
-    # CHANGED log to debug_log
     debug_log "Daemon service is responsive."
     break
   fi
@@ -342,19 +375,13 @@ if ! nordvpn status &> /dev/null; then
     [ -f /var/log/nordvpn/daemon.log ] && log "Daemon Log:" && tail /var/log/nordvpn/daemon.log
     exit 1
 fi
-# ==========================================================
-# ===== END OF ROBUST DAEMON START BLOCK ===================
-# ==========================================================
+# --- End Robust Daemon Start ---
 
-# CHANGED log to debug_log
 debug_log "Daemon service is responsive."
 
-# --- ADDED BLOCK ---
-# CHANGED log to debug_log
 debug_log "Ensuring clean state: Forcing disconnect..."
-nordvpn disconnect &> /dev/null || true # Output unterdrÃ¼ckt und Fehler abgefangen
-sleep 1 # Kurze Pause geben
-# --- END ADDED BLOCK ---
+nordvpn disconnect &> /dev/null || true
+sleep 1 
 
 nordvpn set analytics disabled || true
 nordvpn set technology "${VPN_TECHNOLOGY}" || true
@@ -401,25 +428,27 @@ do_connect() {
   local IFACE
   for i in {1..5}; do IFACE=$(find_vpn_iface); [ -n "$IFACE" ] && break; sleep 1; done
   
-  # --- ADDED PAUSE BLOCK ---
+  # Pause for interface stability
   if [ -n "$IFACE" ]; then
     log "VPN Interface $IFACE found. Waiting a few seconds for stability..."
-    sleep 5 # 5 Sekunden Pause, um dem NordVPN Client Zeit zum Stabilisieren zu geben
-  # --- END PAUSE BLOCK ---
+    sleep 5 # Give the client time to stabilize
     cleanup_iptables "$IFACE"
     apply_iptables "$IFACE"
     local DETECTED_MTU
     DETECTED_MTU=$(detect_mtu_for_iface "$IFACE")
     [ -n "$DETECTED_MTU" ] && apply_mtu "$IFACE" "$DETECTED_MTU"
+
+    # WG-Bypass-Regeln HIER anwenden
+    apply_wg_bypass_rules
+
   else
     log "WARNING: No VPN interface found after connect."
   fi
 
-  # --- MODIFIED DNS BLOCK ---
+  # Force NordVPN DNS
   log "Forcing NordVPN DNS in resolv.conf for stack stability..."
   echo "nameserver 103.86.96.100" > /etc/resolv.conf
   echo "nameserver 103.86.99.100" >> /etc/resolv.conf
-  # --- END MODIFIED BLOCK ---
 
   local VPN_IP
   VPN_IP=$(curl -s https://ipinfo.io/ip || echo "unknown")
@@ -428,46 +457,12 @@ do_connect() {
 
 do_connect
 
-# ==========================================================
-# ===== FINAL FUNCTION: WireGuard Server Bypass ============
-# ==========================================================
-if [[ "${WIREGUARD_BYPASS,,}" == "on" ]]; then
-  if [ -z "$WIREGUARD_SERVER_IP" ] || [ -z "$WIREGUARD_SUBNET" ]; then
-    log "ERROR: WIREGUARD_BYPASS is on, but WIREGUARD_SERVER_IP or WIREGUARD_SUBNET is not set."
-  else
-    log "WireGuard server bypass enabled. Applying rules for server $WIREGUARD_SERVER_IP and subnet $WIREGUARD_SUBNET..."
-
-    # 1. Route for the return path (for data traffic)
-    if ! ip route show | grep -q "${WIREGUARD_SUBNET} via ${WIREGUARD_SERVER_IP}"; then
-      # CHANGED log to debug_log
-      debug_log "--> Adding route for WireGuard subnet ${WIREGUARD_SUBNET}..."
-      ip route add "${WIREGUARD_SUBNET}" via "${WIREGUARD_SERVER_IP}"
-    else
-      # CHANGED log to debug_log
-      debug_log "--> Route for WireGuard subnet already exists."
-    fi
-
-    # 2. "VIP Pass" for the Killswitch (for the handshake)
-    if ! iptables -t mangle -C PREROUTING -s "$WIREGUARD_SERVER_IP" -j MARK --set-xmark 0xe1f1 2>/dev/null; then
-      # CHANGED log to debug_log
-      debug_log "--> Adding iptables mangle rule for Killswitch bypass..."
-      iptables -t mangle -I PREROUTING 1 -s "$WIREGUARD_SERVER_IP" -j MARK --set-xmark 0xe1f1
-    else
-      # CHANGED log to debug_log
-      debug_log "--> iptables mangle rule for Killswitch bypass already exists."
-    fi
-
-    log "WireGuard bypass rules successfully applied."
-  fi
-fi
-# ==========================================================
-# ===== END OF FINAL FUNCTION ==============================
-# ==========================================================
+# WireGuard Server Bypass
+# Wir rufen ihn hier trotzdem einmal auf, falls do_connect fehlschlagen sollte
+apply_wg_bypass_rules
 
 
-# ==========================================================
-# ===== NEW FUNCTION: Log wg-easy Hooks ====================
-# ==========================================================
+# --- Log wg-easy Hooks ---
 if [[ "${SHOW_WGHOOKS,,}" == "on" ]]; then
     log "--- Recommended wg-easy PostUp/PostDown Hooks ---"
     GATEWAY_IP=$(ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
@@ -500,9 +495,7 @@ if [[ "${SHOW_WGHOOKS,,}" == "on" ]]; then
     fi
     log "--- End of recommended hooks ---"
 fi
-# ==========================================================
-# ===== END OF NEW FUNCTION ================================
-# ==========================================================
+# --- End Log wg-easy Hooks ---
 
 
 # --- Start background updater if enabled ---
@@ -525,6 +518,11 @@ while true; do
     NOW=$(date +%s)
     ELASPED=$(( (NOW - LAST_REFRESH) / 60 ))
     if [ "$ELASPED" -ge "${VPN_REFRESH}" ]; then
+      
+      # Conntrack hier leeren
+      log "INFO: Flushing conntrack before forced refresh..."
+      if command -v conntrack >/dev/null; then conntrack -F; fi
+
       if [[ "${VPN_AUTO_CONNECT}" == "best" ]]; then
         log "Forced refresh: Finding new best server before disconnecting..."
         best_server_found=$(find_best_server || echo "")
@@ -556,6 +554,10 @@ while true; do
   STATUS=$(nordvpn status || true)
   if ! echo "$STATUS" | grep -q "Status: Connected"; then
     log "VPN not connected -> reconnecting..."
+
+    # Conntrack hier leeren
+    log "INFO: Flushing conntrack before reconnect..."
+    if command -v conntrack >/dev/null; then conntrack -F; fi
 
     reconnect_server=""
     if [[ "${VPN_AUTO_CONNECT}" == "best" && -s $BEST_SERVER_CACHE_FILE ]]; then

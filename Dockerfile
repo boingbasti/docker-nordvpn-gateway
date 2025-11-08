@@ -16,6 +16,7 @@ RUN apt-get update && \
       wireguard-tools \
       iputils-ping \
       jq \
+      conntrack \
       ca-certificates && \
     # Add NordVPN repo key and list
     wget -qO /etc/apt/trusted.gpg.d/nordvpn_public.asc https://repo.nordvpn.com/gpg/nordvpn_public.asc && \
