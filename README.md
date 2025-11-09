@@ -17,6 +17,8 @@ It is designed to serve as a central, fail-safe internet access point for other 
 
 * 🚀 **Optimized Performance** — Automatically detects the optimal MTU for your connection using a binary ping test to maximize throughput.
 
+* 📈 **Performance Self-Healing** — An optional speed test (`VPN_SPEED_CHECK_INTERVAL`) monitors throughput and automatically reconnects if the speed drops below your defined limit (`VPN_MIN_SPEED`), ensuring a fast connection.
+
 * 🧩 **Advanced WireGuard Bypass** — Allows an external WireGuard server (e.g. `wg-easy`) to route through the VPN *without* the killswitch blocking its handshake.
   ⚠️ **Note:** WireGuard bypass requires the container to run in a `macvlan` network — it will not work in `network_mode: service:vpn`.
 
@@ -192,8 +194,10 @@ services:
       - KILLSWITCH=on
 
       # --- Maintenance & Resilience ---
-      - VPN_REFRESH=1440 # Reconnect once every 24 hours
+      - VPN_REFRESH=0 # Disabled in favor of new Speed Test
       - LOG_STATUS_INTERVAL=60
+      - VPN_SPEED_CHECK_INTERVAL=30 # e.g., check every 30 minutes
+      - VPN_MIN_SPEED=20 # e.g., reconnect if speed drops below 20 MBit/s
       - DEBUG=off
     volumes:
       - ./nordvpn_token.txt:/run/secrets/nordvpn_token:ro
@@ -337,8 +341,10 @@ networks:
 - `CHECK_INTERVAL` — seconds between health checks (default `60`)
 - `RETRY_COUNT` — retries before reconnect (default `2`)
 - `RETRY_DELAY` — seconds between retries (default `2`)
-- `VPN_REFRESH` — reconnect every X *minutes* (default `0` = disabled)
+- `VPN_REFRESH` — reconnect every X *minutes* (default `0` = disabled, **deprecated**)
 - `LOG_STATUS_INTERVAL` — minutes between status logs (default `0` = disabled)
+- `VPN_SPEED_CHECK_INTERVAL` — minutes between speed checks (default `0` = disabled)
+- `VPN_MIN_SPEED` — MBit/s threshold to trigger reconnect (default `5`)
 
 ---
 ## 🔍 Troubleshooting

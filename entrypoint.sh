@@ -122,6 +122,11 @@ WIREGUARD_SERVER_IP=${WIREGUARD_SERVER_IP:-}
 WIREGUARD_SUBNET=${WIREGUARD_SUBNET:-}
 # Defaults for logging hooks
 SHOW_WGHOOKS=${SHOW_WGHOOKS:-off}
+# --- NEUE SPEED-TEST VARIABLEN ---
+VPN_SPEED_CHECK_INTERVAL=${VPN_SPEED_CHECK_INTERVAL:-0} # In Minuten, 0 = deaktiviert
+VPN_MIN_SPEED=${VPN_MIN_SPEED:-5} # In MBit/s
+SPEED_TEST_URL=${SPEED_TEST_URL:-"http://cachefly.cachefly.net/10mb.test"}
+# --- ENDE NEUE VARIABLEN ---
 
 
 # MTU cache
@@ -350,8 +355,16 @@ if [[ "${VPN_AUTO_CONNECT}" == "best" && -z "${VPN_SERVER}" ]]; then
 fi
 
 # --- Robust Daemon Start ---
+log "Ensuring no stray daemon is running..."
+pkill -9 nordvpnd || true
+rm -f /run/nordvpn/nordvpnd.sock
+sleep 1
+
+log "Starting NordVPN service daemon..."
 service nordvpn start || true
 sleep 2
+# --- Ende der Änderung ---
+
 debug_log "Waiting for daemon socket file..."
 for i in {1..15}; do [ -S /run/nordvpn/nordvpnd.sock ] && break; sleep 1; done
 
@@ -506,6 +519,8 @@ fi
 
 LAST_REFRESH=$(date +%s)
 LAST_STATUS_LOG=$(date +%s)
+# --- NEU: Timer für Speed-Test ---
+LAST_SPEED_TEST=$(date +%s)
 
 # --- Loop ---
 while true; do
@@ -513,9 +528,10 @@ while true; do
   if [ "$DEBUG" = "on" ]; then ping_output=$(ping -c 1 -w 3 1.1.1.1 2>&1 || true); if [ -n "$ping_output" ]; then printf '%s\n' "$ping_output" | while IFS= read -r line; do debug_log "Keep-alive ping: $line"; done; else debug_log "Keep-alive ping: FAILED (no output)"; fi; else ping -c 1 -w 3 1.1.1.1 > /dev/null 2>&1 || true; fi
   if ! [ -S /run/nordvpn/nordvpnd.sock ]; then log "Daemon socket missing..."; service nordvpn restart || true; sleep 2; do_connect "reconnect"; LAST_REFRESH=$(date +%s); continue; fi
 
+  NOW=$(date +%s)
+
   # --- ADVANCED REFRESH LOGIC ---
   if [ "${VPN_REFRESH}" -gt 0 ]; then
-    NOW=$(date +%s)
     ELASPED=$(( (NOW - LAST_REFRESH) / 60 ))
     if [ "$ELASPED" -ge "${VPN_REFRESH}" ]; then
       
@@ -549,8 +565,43 @@ while true; do
   fi
   # --- END ADVANCED REFRESH LOGIC ---
 
-  if [ "$LOG_STATUS_INTERVAL" -gt 0 ]; then NOW=$(date +%s); ELASPED=$(( (NOW - LAST_STATUS_LOG) / 60 )); if [ "$ELASPED" -ge "$LOG_STATUS_INTERVAL" ]; then STATUS=$(nordvpn status || true); UPTIME=$(echo "$STATUS" | grep -i "Uptime" | awk -F': ' '{print $2}'); TRANSFER=$(echo "$STATUS" | grep -i "Transfer" | awk -F': ' '{print $2}'); log "Session status - Uptime: ${UPTIME:-unknown}, Transfer: ${TRANSFER:-unknown}"; LAST_STATUS_LOG=$NOW; fi; fi
+  # --- LOG STATUS LOGIC ---
+  if [ "$LOG_STATUS_INTERVAL" -gt 0 ]; then ELASPED=$(( (NOW - LAST_STATUS_LOG) / 60 )); if [ "$ELASPED" -ge "$LOG_STATUS_INTERVAL" ]; then STATUS=$(nordvpn status || true); UPTIME=$(echo "$STATUS" | grep -i "Uptime" | awk -F': ' '{print $2}'); TRANSFER=$(echo "$STATUS" | grep -i "Transfer" | awk -F': ' '{print $2}'); log "Session status - Uptime: ${UPTIME:-unknown}, Transfer: ${TRANSFER:-unknown}"; LAST_STATUS_LOG=$NOW; fi; fi
 
+  # --- NEUER SPEED-TEST BLOCK ---
+  if [ "${VPN_SPEED_CHECK_INTERVAL}" -gt 0 ]; then
+    ELASPED_SPEED=$(( (NOW - LAST_SPEED_TEST) / 60 ))
+    if [ "$ELASPED_SPEED" -ge "${VPN_SPEED_CHECK_INTERVAL}" ]; then
+      debug_log "Running periodic speed check (min: ${VPN_MIN_SPEED} MBit/s)..."
+      
+      # Umrechnung von MBit/s in Bytes/s (1 MBit = 1,000,000 bits. / 8 bits = 125,000 Bytes)
+      MIN_SPEED_BYTES=$(( VPN_MIN_SPEED * 125000 ))
+      
+      # Führe den Test durch
+      CURRENT_SPEED=$(curl -w '%{speed_download}\n' -o /dev/null -s --max-time 20 "$SPEED_TEST_URL" | cut -d'.' -f1 || echo 0)
+      
+      debug_log "Speed test result: ${CURRENT_SPEED} Bytes/s. Threshold: ${MIN_SPEED_BYTES} Bytes/s."
+
+      if [ "$CURRENT_SPEED" -lt "$MIN_SPEED_BYTES" ] && [ "$CURRENT_SPEED" -ne 0 ]; then
+        log "WARNING: Speed check FAILED. Current speed (${CURRENT_SPEED} B/s) is below threshold (${MIN_SPEED_BYTES} B/s). Triggering reconnect..."
+        
+        # Löse den Reconnect aus (gleiche Logik wie bei "VPN not connected")
+        log "INFO: Flushing conntrack before speed-test reconnect..."
+        if command -v conntrack >/dev/null; then conntrack -F; fi
+        nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
+        do_connect "reconnect" # Nutzt "reconnect", um einen neuen Server zu finden
+        
+        LAST_REFRESH=$NOW # Setze auch den Refresh-Timer zurück
+      else
+        debug_log "Speed check PASSED (${CURRENT_SPEED} B/s)."
+      fi
+      LAST_SPEED_TEST=$NOW # Setze den Speed-Test-Timer zurück
+      continue # Starte die Schleife neu
+    fi
+  fi
+  # --- ENDE SPEED-TEST BLOCK ---
+
+  # --- STANDARD RECONNECT LOGIC ---
   STATUS=$(nordvpn status || true)
   if ! echo "$STATUS" | grep -q "Status: Connected"; then
     log "VPN not connected -> reconnecting..."
@@ -574,6 +625,7 @@ while true; do
     continue
   fi
 
+  # --- STANDARD CONNECTIVITY CHECK ---
   SUCCESS=0; attempt=0
   while [ "$attempt" -lt "$RETRY_COUNT" ]; do attempt=$((attempt+1)); if curl -s --max-time 10 https://www.google.com > /dev/null; then SUCCESS=1; break; fi; [ "$attempt" -lt "$RETRY_COUNT" ] && sleep "$RETRY_DELAY"; done
   if [ "$SUCCESS" -eq 0 ]; then log "Connectivity check FAILED -> reconnecting..."; nordvpn disconnect 2>&1 | grep -v "How would you rate" || true; do_connect "reconnect"; continue; fi
