@@ -318,7 +318,7 @@ networks:
 | `CHECK_INTERVAL` | 60 | `CHECK_INTERVAL=30` | Loop check frequency (seconds). |
 | `RETRY_COUNT` | 2 | `RETRY_COUNT=3` | Retry attempts before reconnect. |
 | `RETRY_DELAY` | 2 | `RETRY_DELAY=2` | Seconds between retries. |
-| `VPN_REFRESH` | 0 | `VPN_REFRESH=1440` | Legacy reconnect timer (use speed check instead). |
+| `VPN_REFRESH` | 0 | `VPN_REFRESH=1440` | Forces a periodic reconnect to rotate the public exit IP address. Useful for privacy and session/rate-limit resets. If VPN_SPEED_CHECK_INTERVAL is also enabled, whichever triggers first will reconnect. Value is in minutes. |
 
 ### 5) Logging & Diagnostics
 | Variable | Default | Example | Description |
