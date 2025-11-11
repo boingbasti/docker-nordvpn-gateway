@@ -1,0 +1,130 @@
+version: "3.9"
+
+services:
+  vpn:
+    image: boingbasti/nordvpn-gateway:latest
+    container_name: nordvpn-gateway
+    networks:
+      macvlan_net:
+        ipv4_address: 192.168.1.100
+    stop_grace_period: 45s
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun
+    environment:
+      # WireGuard Bypass
+      - WIREGUARD_BYPASS=on
+      - WIREGUARD_SERVER_IP=192.168.1.200
+      - WIREGUARD_SUBNET=10.100.100.0/24
+
+      # LAN and WG client access
+      - ALLOWLIST_SUBNET=192.168.1.0/24,10.100.100.0/24
+
+      # VPN Connection
+      - VPN_COUNTRY=Germany
+      - VPN_GROUP=p2p
+      - VPN_AUTO_CONNECT=best
+      - VPN_MTU=auto
+      - VPN_TECHNOLOGY=NordLynx
+      - KILLSWITCH=on
+      - POST_QUANTUM=on
+
+      # Maintenance / Stability
+      - VPN_REFRESH=1440
+      - LOG_STATUS_INTERVAL=60
+      - CHECK_INTERVAL=60
+      - RETRY_COUNT=3
+      - RETRY_DELAY=2
+      - CONNECT_TIMEOUT=30
+
+      # Performance Self-Healing
+      - VPN_SPEED_CHECK_INTERVAL=30
+      - VPN_MIN_SPEED=20
+
+      # Debug
+      - DEBUG=off
+
+    volumes:
+      - ./nordvpn_token.txt:/run/secrets/nordvpn_token:ro
+      - /etc/localtime:/etc/localtime:ro
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv6.conf.all.disable_ipv6=1
+      - net.ipv6.conf.default.disable_ipv6=1
+    restart: unless-stopped
+
+  wg-easy:
+    image: ghcr.io/wg-easy/wg-easy:latest
+    container_name: wireguard-easy
+    networks:
+      macvlan_net:
+        ipv4_address: 192.168.1.200
+    depends_on:
+      - vpn
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    volumes:
+      - ./data/wg-easy-config:/etc/wireguard
+    environment:
+      - DISABLE_IPV6=true
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+      - net.ipv6.conf.default.disable_ipv6=1
+      - net.ipv6.conf.lo.disable_ipv6=1
+    restart: unless-stopped
+
+  adguardhome:
+    container_name: adguard-home
+    image: adguard/adguardhome:latest
+    depends_on:
+      - vpn
+    network_mode: "service:vpn"
+    volumes:
+      - ./data/adguard-work:/opt/adguardhome/work
+      - ./data/adguard-config:/opt/adguardhome/conf
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nslookup", "google.com", "1.1.1.1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 2m
+
+  socks5:
+    image: boingbasti/nordvpn-socks5:latest
+    container_name: vpn-socks5-proxy
+    depends_on:
+      - vpn
+    network_mode: "service:vpn"
+    environment:
+      - PROXY_PORT=1080
+      - ALLOWED_IPS=192.168.1.0/24,127.0.0.1/32
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsSL", "--max-time", "5", "-x", "socks5h://localhost:1080", "https://1.1.1.1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 1m
+
+  http-proxy:
+    image: boingbasti/nordvpn-privoxy:latest
+    container_name: vpn-http-proxy
+    depends_on:
+      - vpn
+    network_mode: "service:vpn"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsSL", "--max-time", "5", "-x", "http://localhost:8118", "https://1.1.1.1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 1m
+
+networks:
+  macvlan_net:
+    external: true
+    name: macvlan_net
