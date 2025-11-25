@@ -122,11 +122,13 @@ WIREGUARD_SERVER_IP=${WIREGUARD_SERVER_IP:-}
 WIREGUARD_SUBNET=${WIREGUARD_SUBNET:-}
 # Defaults for logging hooks
 SHOW_WGHOOKS=${SHOW_WGHOOKS:-off}
-# --- NEUE SPEED-TEST VARIABLEN ---
+# Speed Test Defaults
 VPN_SPEED_CHECK_INTERVAL=${VPN_SPEED_CHECK_INTERVAL:-0} # In Minuten, 0 = deaktiviert
 VPN_MIN_SPEED=${VPN_MIN_SPEED:-5} # In MBit/s
 SPEED_TEST_URL=${SPEED_TEST_URL:-"http://cachefly.cachefly.net/10mb.test"}
-# --- ENDE NEUE VARIABLEN ---
+# --- NEU: Threat Protection Variable ---
+THREAT_PROTECTION_LITE=${THREAT_PROTECTION_LITE:-off}
+# --- ENDE NEU ---
 
 
 # MTU cache
@@ -363,7 +365,6 @@ sleep 1
 log "Starting NordVPN service daemon..."
 service nordvpn start || true
 sleep 2
-# --- Ende der Änderung ---
 
 debug_log "Waiting for daemon socket file..."
 for i in {1..15}; do [ -S /run/nordvpn/nordvpnd.sock ] && break; sleep 1; done
@@ -396,6 +397,7 @@ debug_log "Ensuring clean state: Forcing disconnect..."
 nordvpn disconnect &> /dev/null || true
 sleep 1 
 
+# --- Configuration Settings ---
 nordvpn set analytics disabled || true
 nordvpn set technology "${VPN_TECHNOLOGY}" || true
 if [ -n "${PROTOCOL}" ] && [ "${VPN_TECHNOLOGY,,}" = "openvpn" ]; then nordvpn set protocol "${PROTOCOL}" || true; fi
@@ -403,6 +405,11 @@ log "Logging in with token..."
 nordvpn login --token "$TOKEN" 2>&1 | grep -v -E "Welcome|By default|To limit" || true
 nordvpn set killswitch "${KILLSWITCH}" || true
 nordvpn set pq "${POST_QUANTUM}" || true
+
+# --- NEU: Feature-Einstellungen (Nach Login, Vor Connect) ---
+nordvpn set notify off || true
+nordvpn set threatprotectionlite "$THREAT_PROTECTION_LITE" || true
+# --- ENDE NEU ---
 
 # Process comma-separated allowlist
 if [ -n "${ALLOWLIST_SUBNET}" ]; then
@@ -412,7 +419,14 @@ if [ -n "${ALLOWLIST_SUBNET}" ]; then
   done
 fi
 
-nordvpn set dns 103.86.96.100 103.86.99.100 || true
+# --- WICHTIGE KORREKTUR: DNS nur setzen, wenn Threat Protection AUS ist ---
+if [ "$THREAT_PROTECTION_LITE" != "on" ]; then
+    log "Setting standard NordVPN DNS (103.86.x.x) to prevent DNS leaks."
+    nordvpn set dns 103.86.96.100 103.86.99.100 || true
+else
+    log "Threat Protection Lite is active. Skipping manual DNS setting."
+fi
+# --- ENDE KORREKTUR ---
 
 # --- Connect ---
 do_connect() {
@@ -458,10 +472,15 @@ do_connect() {
     log "WARNING: No VPN interface found after connect."
   fi
 
-  # Force NordVPN DNS
-  log "Forcing NordVPN DNS in resolv.conf for stack stability..."
-  echo "nameserver 103.86.96.100" > /etc/resolv.conf
-  echo "nameserver 103.86.99.100" >> /etc/resolv.conf
+  # --- NEU: Bedingtes DNS-Forcing auch hier ---
+  if [ "$THREAT_PROTECTION_LITE" != "on" ]; then
+    log "Forcing NordVPN DNS in resolv.conf for stack stability..."
+    echo "nameserver 103.86.96.100" > /etc/resolv.conf
+    echo "nameserver 103.86.99.100" >> /etc/resolv.conf
+  else
+    log "Threat Protection Lite is active. Trusting client DNS settings in resolv.conf."
+  fi
+  # --- ENDE NEU ---
 
   local VPN_IP
   VPN_IP=$(curl -s https://ipinfo.io/ip || echo "unknown")
@@ -508,8 +527,6 @@ if [[ "${SHOW_WGHOOKS,,}" == "on" ]]; then
     fi
     log "--- End of recommended hooks ---"
 fi
-# --- End Log wg-easy Hooks ---
-
 
 # --- Start background updater if enabled ---
 if [[ "${VPN_AUTO_CONNECT}" == "best" && "${VPN_BEST_SERVER_CHECK_INTERVAL}" -gt 0 ]]; then
