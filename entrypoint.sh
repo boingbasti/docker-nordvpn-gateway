@@ -229,7 +229,6 @@ apply_wg_bypass_rules() {
         debug_log "--> Route for WireGuard subnet already exists."
       fi
 
-      # --- KORRIGIERTER BLOCK: Robuste "Delete-then-Add" Logik ---
       # 2. "VIP Pass" for the Killswitch (for the handshake)
       debug_log "--> (Re)applying iptables mangle rule for Killswitch bypass..."
       
@@ -238,8 +237,7 @@ apply_wg_bypass_rules() {
       
       # Insert the rule at the top of the chain
       iptables -t mangle -I PREROUTING 1 -s "$WIREGUARD_SERVER_IP" -j MARK --set-xmark 0xe1f1
-      # --- ENDE KORRIGIERTER BLOCK ---
-
+      
       log "WireGuard bypass rules successfully applied."
     fi
   fi
@@ -286,9 +284,12 @@ find_best_server() {
   debug_log "Found group ID: ${group_id}"
 
   debug_log "--> Step 1: Fetching recommended servers from NordVPN API..."
+  
+  # --- FIX: Removed backslashes from [] characters for curl -g ---
   local server_list
-  server_list=$(curl -s -g "https://api.nordvpn.com/v1/servers/recommendations?filters\[country_id\]=${country_id}&filters\[servers_groups\]\[id\]=${group_id}&limit=15" | \
+  server_list=$(curl -s -g "https://api.nordvpn.com/v1/servers/recommendations?filters[country_id]=${country_id}&filters[servers_groups][id]=${group_id}&limit=15" | \
     jq -r '.[].hostname')
+  # --- END FIX ---
 
   if [[ -z "$server_list" ]]; then log "Error: No recommended servers found."; return 1; fi
 
