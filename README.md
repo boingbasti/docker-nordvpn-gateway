@@ -1,4 +1,5 @@
 ![GitHub Release](https://img.shields.io/github/v/release/boingbasti/docker-nordvpn-gateway?label=Version&color=blue)
+![GitHub Release Date](https://img.shields.io/github/release-date/boingbasti/docker-nordvpn-gateway?label=Last%20Update&color=blue)
 ![Docker Pulls](https://img.shields.io/docker/pulls/boingbasti/nordvpn-gateway?label=Pulls)
 ![Image Size](https://img.shields.io/docker/image-size/boingbasti/nordvpn-gateway?label=Image%20Size)
 
