@@ -23,6 +23,20 @@ It supports **WireGuard server integration**, **DNS over VPN** via AdGuard Home,
 
 ---
 
+## 🔌 Exposed Services & Ports
+
+Since all services share the VPN network stack, they are accessible via the **Gateway IP** (not localhost).
+
+| Service | Port | Description | Usage Example |
+|---|---|---|---|
+| **SOCKS5 Proxy** | `1080` | Secure proxy for browsers/apps. | `curl -x socks5h://GATEWAY_IP:1080 ipinfo.io` |
+| **HTTP Proxy** | `8118` | Privoxy HTTP proxy with ad-blocking. | `curl -x http://GATEWAY_IP:8118 ipinfo.io` |
+| **AdGuard Home** | `80` / `3000` | DNS Server & Web Interface. | Open `http://GATEWAY_IP:80` (or `3000` for setup) |
+| **WireGuard** | `51820` | UDP Port for VPN Clients (wg-easy). | Configure in Router Port Forwarding. |
+| **wg-easy UI** | `51821` | WireGuard Web Admin UI. | Open `http://WG_SERVER_IP:51821` (Note: Has its own IP) |
+
+---
+
 ## 🛠 Web-Configurator for Automatic YAML
 
 Instead of manually writing complex YAML, you can use the visual generator:
