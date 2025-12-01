@@ -126,14 +126,19 @@ SHOW_WGHOOKS=${SHOW_WGHOOKS:-off}
 VPN_SPEED_CHECK_INTERVAL=${VPN_SPEED_CHECK_INTERVAL:-0} # In Minuten, 0 = deaktiviert
 VPN_MIN_SPEED=${VPN_MIN_SPEED:-5} # In MBit/s
 SPEED_TEST_URL=${SPEED_TEST_URL:-"http://cachefly.cachefly.net/10mb.test"}
-# --- NEU: Threat Protection Variable ---
 THREAT_PROTECTION_LITE=${THREAT_PROTECTION_LITE:-off}
-# --- ENDE NEU ---
 
+# --- FIX: Handle 'standard' group ---
+# NordVPN uses no group flag for standard servers, so we clear the variable.
+if [[ "${VPN_GROUP,,}" == "standard" ]]; then
+  log "Configured group is 'standard'. Connecting without specific group flag."
+  VPN_GROUP=""
+fi
 
 # MTU cache
 MTU_CACHE=""
 BEST_SERVER_CACHE_FILE="/tmp/best_server.txt"
+SERVER_CANDIDATES_FILE="/tmp/server_candidates"
 
 # --- Function: Determine MTU via Ping Test ---
 find_best_mtu() {
@@ -213,7 +218,7 @@ cleanup_iptables() {
 }
 # --- End IPTables Helpers ---
 
-# --- Funktion: WireGuard Server Bypass ---
+# --- Function: WireGuard Server Bypass ---
 apply_wg_bypass_rules() {
   if [[ "${WIREGUARD_BYPASS,,}" == "on" ]]; then
     if [ -z "$WIREGUARD_SERVER_IP" ] || [ -z "$WIREGUARD_SUBNET" ]; then
@@ -231,11 +236,7 @@ apply_wg_bypass_rules() {
 
       # 2. "VIP Pass" for the Killswitch (for the handshake)
       debug_log "--> (Re)applying iptables mangle rule for Killswitch bypass..."
-      
-      # Try to delete the rule, ignore errors if it doesn't exist
       iptables -t mangle -D PREROUTING -s "$WIREGUARD_SERVER_IP" -j MARK --set-xmark 0xe1f1 2>/dev/null || true
-      
-      # Insert the rule at the top of the chain
       iptables -t mangle -I PREROUTING 1 -s "$WIREGUARD_SERVER_IP" -j MARK --set-xmark 0xe1f1
       
       log "WireGuard bypass rules successfully applied."
@@ -277,32 +278,39 @@ find_best_server() {
     *) api_group_identifier="${VPN_GROUP}" ;;
   esac
 
-  debug_log "Fetching group ID for '${VPN_GROUP}' (using API identifier '${api_group_identifier}')..."
-  local group_id
-  group_id=$(curl -s 'https://api.nordvpn.com/v1/servers/groups' | jq --arg GROUP "$api_group_identifier" '.[] | select(.identifier == $GROUP) | .id')
-  if [[ -z "$group_id" ]]; then log "Error: Could not find group ID for '${VPN_GROUP}'."; return 1; fi
-  debug_log "Found group ID: ${group_id}"
+  # Handle empty group identifier (standard servers) properly in query
+  local group_filter=""
+  if [ -n "$api_group_identifier" ]; then
+      debug_log "Fetching group ID for '${VPN_GROUP}' (using API identifier '${api_group_identifier}')..."
+      local group_id
+      group_id=$(curl -s 'https://api.nordvpn.com/v1/servers/groups' | jq --arg GROUP "$api_group_identifier" '.[] | select(.identifier == $GROUP) | .id')
+      if [[ -z "$group_id" ]]; then log "Error: Could not find group ID for '${VPN_GROUP}'."; return 1; fi
+      debug_log "Found group ID: ${group_id}"
+      group_filter="&filters[servers_groups][id]=${group_id}"
+  fi
 
   debug_log "--> Step 1: Fetching recommended servers from NordVPN API..."
-  
-  # --- FIX: Removed backslashes from [] characters for curl -g ---
   local server_list
-  server_list=$(curl -s -g "https://api.nordvpn.com/v1/servers/recommendations?filters[country_id]=${country_id}&filters[servers_groups][id]=${group_id}&limit=15" | \
+  server_list=$(curl -s -g "https://api.nordvpn.com/v1/servers/recommendations?filters[country_id]=${country_id}${group_filter}&limit=15" | \
     jq -r '.[].hostname')
-  # --- END FIX ---
 
   if [[ -z "$server_list" ]]; then log "Error: No recommended servers found."; return 1; fi
 
-  debug_log "--> Step 2: Pinging recommended servers in parallel to find best latency..."
+  debug_log "--> Step 2: Quality Ping (3 packets, strict 0% loss check) to find best latency..."
   local ping_results
   ping_results=$(
     for server in $server_list; do
       (
+        # Send 3 Pings, fast interval (0.2s), 1s timeout, quiet output
         local ping_output
-        ping_output=$(ping -c 1 -W 2 "$server")
-        if [ $? -eq 0 ]; then
+        ping_output=$(ping -c 3 -q -i 0.2 -W 1 "$server" 2>&1)
+        
+        # Only accept servers with 0% packet loss
+        if echo "$ping_output" | grep -q "0% packet loss"; then
+          # Extract Average RTT (avg) from line like: "rtt min/avg/max/mdev = 13.9/14.0/14.1/0.1 ms"
           local latency
-          latency=$(echo "$ping_output" | tail -n 1 | awk -F'/' '{print $5}')
+          latency=$(echo "$ping_output" | grep "rtt" | cut -d'=' -f2 | awk -F'/' '{print $2}')
+          
           if [ -n "$latency" ]; then
             printf "%.2f %s\n" "$latency" "$server"
           fi
@@ -312,12 +320,18 @@ find_best_server() {
     wait
   )
 
-  if [ -z "$ping_results" ]; then log "Error: Parallel ping could not find any responsive servers."; return 1; fi
+  if [ -z "$ping_results" ]; then log "Error: Quality Ping (strict 0% loss) could not find any responsive servers."; return 1; fi
 
-  local best_server_hostname
-  best_server_hostname=$(echo "$ping_results" | sort -n | head -n 1 | awk '{print $2}')
+  # Sort by latency
+  local sorted_results
+  sorted_results=$(echo "$ping_results" | sort -n)
 
-  echo "$best_server_hostname" | sed -E 's/\.nordvpn\.com//'
+  # --- NEW: Candidate Logic ---
+  # Save top 3 servers to candidate file (server IDs only)
+  echo "$sorted_results" | head -n 3 | awk '{print $2}' | sed -E 's/\.nordvpn\.com//' > "$SERVER_CANDIDATES_FILE"
+  
+  # Return the best one
+  echo "$sorted_results" | head -n 1 | awk '{print $2}' | sed -E 's/\.nordvpn\.com//'
 }
 
 # --- Background process to periodically find the best server ---
@@ -337,6 +351,79 @@ background_best_server_updater() {
   done
 }
 
+# --- Shared Speed Test & Candidate Rotation Logic ---
+perform_speed_check() {
+  # If speed check is disabled (interval=0) and we are not forcing it (e.g. startup), skip.
+  # But we want to use min_speed as a threshold anyway.
+  if [ "${VPN_MIN_SPEED}" -le 0 ]; then return; fi
+
+  debug_log "Running speed check (Threshold: ${VPN_MIN_SPEED} MBit/s)..."
+  
+  # Convert MBit/s to Bytes/s
+  local MIN_SPEED_BYTES=$(( VPN_MIN_SPEED * 125000 ))
+  
+  # Run test
+  local CURRENT_SPEED
+  CURRENT_SPEED=$(curl -w '%{speed_download}\n' -o /dev/null -s --max-time 20 "$SPEED_TEST_URL" | cut -d'.' -f1 || echo 0)
+  
+  debug_log "Speed test result: ${CURRENT_SPEED} Bytes/s."
+
+  if [ "$CURRENT_SPEED" -lt "$MIN_SPEED_BYTES" ] && [ "$CURRENT_SPEED" -ne 0 ]; then
+    log "WARNING: Speed check FAILED. Speed (${CURRENT_SPEED} B/s) < Threshold (${MIN_SPEED_BYTES} B/s)."
+    
+    # 1. Check for candidates (Thronfolger)
+    if [ -s "$SERVER_CANDIDATES_FILE" ]; then
+        # Identify current server ID from status
+        local current_server_id
+        current_server_id=$(nordvpn status | grep 'Hostname:' | awk '{print $2}' | sed -E 's/\.nordvpn\.com//')
+        
+        # Remove current server from candidates list (burn it)
+        if [ -n "$current_server_id" ]; then
+            sed -i "/$current_server_id/d" "$SERVER_CANDIDATES_FILE"
+        fi
+        
+        # Pick next candidate
+        local next_candidate
+        next_candidate=$(head -n 1 "$SERVER_CANDIDATES_FILE")
+        
+        if [ -n "$next_candidate" ]; then
+            log "Candidate available! Switching to next best server: ${next_candidate}..."
+            VPN_SERVER="$next_candidate"
+            
+            # Flush conntrack
+            if command -v conntrack >/dev/null; then conntrack -F; fi
+            
+            nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
+            do_connect # Reconnect using VPN_SERVER variable
+            
+            # --- NEW: Verify the new candidate recursively ---
+            log "Verifying speed of new candidate in 15 seconds..."
+            sleep 15
+            perform_speed_check
+            return # Exit this instance of the function
+        else
+             log "No valid candidates left in list."
+        fi
+    fi
+
+    # 2. Fallback: Standard Reconnect (if no candidates or candidates empty)
+    # We do NOT run a recursive check here to prevent infinite loops if the whole network is slow.
+    log "Triggering standard reconnect (letting NordVPN decide)..."
+    if command -v conntrack >/dev/null; then conntrack -F; fi
+    
+    # Clear cache and specific server var to allow fresh search or standard connect
+    rm -f "$BEST_SERVER_CACHE_FILE"
+    VPN_SERVER="" 
+    
+    nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
+    do_connect "reconnect"
+    
+  else
+    debug_log "Speed check PASSED."
+  fi
+}
+
+
 # --- Startup ---
 log "Starting NordVPN container..."
 CLIENT_VERSION=$(nordvpn --version 2>/dev/null || echo "unknown")
@@ -350,7 +437,7 @@ if [[ "${VPN_AUTO_CONNECT}" == "best" && -z "${VPN_SERVER}" ]]; then
   if [[ -n "$best_server_found" ]]; then
     log "Best server found: ${best_server_found}. This server ID will be used for connection."
     VPN_SERVER="$best_server_found"
-    # Prime the cache file with the initial best server
+    # Prime the cache file
     echo "$best_server_found" > "$BEST_SERVER_CACHE_FILE"
   else
     log "WARNING: Could not find a 'best' server. Using default connection method."
@@ -407,10 +494,9 @@ nordvpn login --token "$TOKEN" 2>&1 | grep -v -E "Welcome|By default|To limit" |
 nordvpn set killswitch "${KILLSWITCH}" || true
 nordvpn set pq "${POST_QUANTUM}" || true
 
-# --- NEU: Feature-Einstellungen (Nach Login, Vor Connect) ---
+# --- Feature Settings ---
 nordvpn set notify off || true
 nordvpn set threatprotectionlite "$THREAT_PROTECTION_LITE" || true
-# --- ENDE NEU ---
 
 # Process comma-separated allowlist
 if [ -n "${ALLOWLIST_SUBNET}" ]; then
@@ -420,14 +506,13 @@ if [ -n "${ALLOWLIST_SUBNET}" ]; then
   done
 fi
 
-# --- WICHTIGE KORREKTUR: DNS nur setzen, wenn Threat Protection AUS ist ---
+# --- DNS Handling ---
 if [ "$THREAT_PROTECTION_LITE" != "on" ]; then
     log "Setting standard NordVPN DNS (103.86.x.x) to prevent DNS leaks."
     nordvpn set dns 103.86.96.100 103.86.99.100 || true
 else
     log "Threat Protection Lite is active. Skipping manual DNS setting."
 fi
-# --- ENDE KORREKTUR ---
 
 # --- Connect ---
 do_connect() {
@@ -444,6 +529,7 @@ do_connect() {
     timeout "${CONNECT_TIMEOUT}" nordvpn connect --group "${VPN_GROUP}" "${VPN_COUNTRY}" &> >(handle_output) || true
   else
     log "Connecting to country: ${VPN_COUNTRY}..."
+    # If VPN_GROUP is empty (standard), this command connects correctly to the country
     timeout "${CONNECT_TIMEOUT}" nordvpn connect "${VPN_COUNTRY}" &> >(handle_output) || true
   fi
 
@@ -466,14 +552,14 @@ do_connect() {
     DETECTED_MTU=$(detect_mtu_for_iface "$IFACE")
     [ -n "$DETECTED_MTU" ] && apply_mtu "$IFACE" "$DETECTED_MTU"
 
-    # WG-Bypass-Regeln HIER anwenden
+    # WG-Bypass rules apply here
     apply_wg_bypass_rules
 
   else
     log "WARNING: No VPN interface found after connect."
   fi
 
-  # --- NEU: Bedingtes DNS-Forcing auch hier ---
+  # --- DNS Forcing ---
   if [ "$THREAT_PROTECTION_LITE" != "on" ]; then
     log "Forcing NordVPN DNS in resolv.conf for stack stability..."
     echo "nameserver 103.86.96.100" > /etc/resolv.conf
@@ -481,7 +567,6 @@ do_connect() {
   else
     log "Threat Protection Lite is active. Trusting client DNS settings in resolv.conf."
   fi
-  # --- ENDE NEU ---
 
   local VPN_IP
   VPN_IP=$(curl -s https://ipinfo.io/ip || echo "unknown")
@@ -491,21 +576,17 @@ do_connect() {
 do_connect
 
 # WireGuard Server Bypass
-# Wir rufen ihn hier trotzdem einmal auf, falls do_connect fehlschlagen sollte
 apply_wg_bypass_rules
-
 
 # --- Log wg-easy Hooks ---
 if [[ "${SHOW_WGHOOKS,,}" == "on" ]]; then
     log "--- Recommended wg-easy PostUp/PostDown Hooks ---"
     GATEWAY_IP=$(ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
-    # Extract the first subnet from the allowlist as the LAN subnet
     LAN_SUBNET=$(echo "$ALLOWLIST_SUBNET" | cut -d',' -f1)
 
     if [ -z "$GATEWAY_IP" ] || [ -z "$LAN_SUBNET" ] || [ -z "$WIREGUARD_SUBNET" ]; then
-        log "Could not determine all required variables (Gateway IP, LAN Subnet, or WireGuard Subnet). Cannot generate hooks."
+        log "Could not determine all required variables. Cannot generate hooks."
     else
-        # Variant WITH local network access
         log ""
         log "--- Variant 1: WITH Local Network Access ---"
         echo ""
@@ -515,8 +596,7 @@ if [[ "${SHOW_WGHOOKS,,}" == "on" ]]; then
         log "PostDown:"
         echo "ip route del 0.0.0.0/1; ip route del 128.0.0.0/1; iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -s ${WIREGUARD_SUBNET} -d ${LAN_SUBNET} -o eth0 -j MASQUERADE"
         echo ""
-
-        # Variant WITHOUT local network access
+        
         log "--- Variant 2: WITHOUT Local Network Access (Internet Only) ---"
         echo ""
         log "PostUp:"
@@ -529,6 +609,14 @@ if [[ "${SHOW_WGHOOKS,,}" == "on" ]]; then
     log "--- End of recommended hooks ---"
 fi
 
+# --- STARTUP: Immediate Speed Check ---
+# Wait 10s for connection to fully stabilize, then check speed.
+if [ "${VPN_SPEED_CHECK_INTERVAL}" -gt 0 ]; then
+    log "Initializing immediate startup speed check (in 15s)..."
+    sleep 15
+    perform_speed_check
+fi
+
 # --- Start background updater if enabled ---
 if [[ "${VPN_AUTO_CONNECT}" == "best" && "${VPN_BEST_SERVER_CHECK_INTERVAL}" -gt 0 ]]; then
   background_best_server_updater &
@@ -537,7 +625,6 @@ fi
 
 LAST_REFRESH=$(date +%s)
 LAST_STATUS_LOG=$(date +%s)
-# --- NEU: Timer für Speed-Test ---
 LAST_SPEED_TEST=$(date +%s)
 
 # --- Loop ---
@@ -553,7 +640,6 @@ while true; do
     ELASPED=$(( (NOW - LAST_REFRESH) / 60 ))
     if [ "$ELASPED" -ge "${VPN_REFRESH}" ]; then
       
-      # Conntrack hier leeren
       log "INFO: Flushing conntrack before forced refresh..."
       if command -v conntrack >/dev/null; then conntrack -F; fi
 
@@ -581,43 +667,19 @@ while true; do
       continue
     fi
   fi
-  # --- END ADVANCED REFRESH LOGIC ---
 
   # --- LOG STATUS LOGIC ---
   if [ "$LOG_STATUS_INTERVAL" -gt 0 ]; then ELASPED=$(( (NOW - LAST_STATUS_LOG) / 60 )); if [ "$ELASPED" -ge "$LOG_STATUS_INTERVAL" ]; then STATUS=$(nordvpn status || true); UPTIME=$(echo "$STATUS" | grep -i "Uptime" | awk -F': ' '{print $2}'); TRANSFER=$(echo "$STATUS" | grep -i "Transfer" | awk -F': ' '{print $2}'); log "Session status - Uptime: ${UPTIME:-unknown}, Transfer: ${TRANSFER:-unknown}"; LAST_STATUS_LOG=$NOW; fi; fi
 
-  # --- NEUER SPEED-TEST BLOCK ---
+  # --- SPEED-TEST BLOCK (Uses new perform_speed_check function) ---
   if [ "${VPN_SPEED_CHECK_INTERVAL}" -gt 0 ]; then
     ELASPED_SPEED=$(( (NOW - LAST_SPEED_TEST) / 60 ))
     if [ "$ELASPED_SPEED" -ge "${VPN_SPEED_CHECK_INTERVAL}" ]; then
-      debug_log "Running periodic speed check (min: ${VPN_MIN_SPEED} MBit/s)..."
-      
-      # Umrechnung von MBit/s in Bytes/s (1 MBit = 1,000,000 bits. / 8 bits = 125,000 Bytes)
-      MIN_SPEED_BYTES=$(( VPN_MIN_SPEED * 125000 ))
-      
-      # Führe den Test durch
-      CURRENT_SPEED=$(curl -w '%{speed_download}\n' -o /dev/null -s --max-time 20 "$SPEED_TEST_URL" | cut -d'.' -f1 || echo 0)
-      
-      debug_log "Speed test result: ${CURRENT_SPEED} Bytes/s. Threshold: ${MIN_SPEED_BYTES} Bytes/s."
-
-      if [ "$CURRENT_SPEED" -lt "$MIN_SPEED_BYTES" ] && [ "$CURRENT_SPEED" -ne 0 ]; then
-        log "WARNING: Speed check FAILED. Current speed (${CURRENT_SPEED} B/s) is below threshold (${MIN_SPEED_BYTES} B/s). Triggering reconnect..."
-        
-        # Löse den Reconnect aus (gleiche Logik wie bei "VPN not connected")
-        log "INFO: Flushing conntrack before speed-test reconnect..."
-        if command -v conntrack >/dev/null; then conntrack -F; fi
-        nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
-        do_connect "reconnect" # Nutzt "reconnect", um einen neuen Server zu finden
-        
-        LAST_REFRESH=$NOW # Setze auch den Refresh-Timer zurück
-      else
-        debug_log "Speed check PASSED (${CURRENT_SPEED} B/s)."
-      fi
-      LAST_SPEED_TEST=$NOW # Setze den Speed-Test-Timer zurück
-      continue # Starte die Schleife neu
+      perform_speed_check
+      LAST_SPEED_TEST=$NOW
     fi
   fi
-  # --- ENDE SPEED-TEST BLOCK ---
+  # --- END SPEED-TEST BLOCK ---
 
   # --- STANDARD RECONNECT LOGIC ---
   STATUS=$(nordvpn status || true)
