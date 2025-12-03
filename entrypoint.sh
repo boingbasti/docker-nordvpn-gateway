@@ -423,6 +423,42 @@ perform_speed_check() {
   fi
 }
 
+# --- NEW: Check Connectivity Quality (The Watchdog) ---
+check_connection_quality() {
+    # Check internet connectivity AND quality (Packet Loss / Latency)
+    # Using 1.1.1.1 (Cloudflare) as a stable target
+    local target="1.1.1.1"
+    
+    # Send 3 pings, fast interval (0.2s), 2s timeout
+    local ping_out
+    ping_out=$(ping -c 3 -q -i 0.2 -W 2 "$target" 2>&1 || true)
+    
+    # Extract avg RTT
+    local avg_rtt
+    avg_rtt=$(echo "$ping_out" | grep "rtt" | cut -d'=' -f2 | awk -F'/' '{print $2}' | cut -d'.' -f1)
+
+    # 1. Check for ANY Packet Loss (Strict Watchdog)
+    # If 100% loss -> Dead. If > 0% loss -> Unstable.
+    if ! echo "$ping_out" | grep -q "0% packet loss"; then
+        log "Watchdog: Packet loss detected! Connection unstable or dead."
+        return 1
+    fi
+    
+    # 2. Check Latency (Lag Watchdog)
+    # Threshold: 600ms (High latency but generous enough to avoid false positives)
+    if [ -n "$avg_rtt" ] && [ "$avg_rtt" -gt 600 ]; then
+        log "Watchdog: Latency too high (${avg_rtt}ms)."
+        return 1
+    fi
+    
+    # Success Log (Visible in DEBUG=on)
+    if [ -n "$avg_rtt" ]; then
+        debug_log "Watchdog: Connection healthy (Avg RTT: ${avg_rtt}ms, Packet Loss: 0%)."
+    fi
+    
+    return 0
+}
+
 
 # --- Startup ---
 log "Starting NordVPN container..."
@@ -615,6 +651,15 @@ if [ "${VPN_SPEED_CHECK_INTERVAL}" -gt 0 ]; then
     log "Initializing immediate startup speed check (in 15s)..."
     sleep 15
     perform_speed_check
+    
+    # --- NEW: Final Success Message ---
+    # We fetch the IP again to confirm everything is routed correctly after the test
+    CURRENT_IP=$(curl -s --max-time 5 https://ipinfo.io/ip || echo "unknown")
+    log "✅ Startup complete. VPN connection stable. Current WAN IP: ${CURRENT_IP}"
+else
+    # If speed check is disabled, just print the success message immediately
+    CURRENT_IP=$(curl -s --max-time 5 https://ipinfo.io/ip || echo "unknown")
+    log "✅ Startup complete. VPN connection stable. Current WAN IP: ${CURRENT_IP}"
 fi
 
 # --- Start background updater if enabled ---
@@ -630,7 +675,10 @@ LAST_SPEED_TEST=$(date +%s)
 # --- Loop ---
 while true; do
   sleep "${CHECK_INTERVAL}"
+  
+  # --- DEBUG LOGGING ---
   if [ "$DEBUG" = "on" ]; then ping_output=$(ping -c 1 -w 3 1.1.1.1 2>&1 || true); if [ -n "$ping_output" ]; then printf '%s\n' "$ping_output" | while IFS= read -r line; do debug_log "Keep-alive ping: $line"; done; else debug_log "Keep-alive ping: FAILED (no output)"; fi; else ping -c 1 -w 3 1.1.1.1 > /dev/null 2>&1 || true; fi
+  
   if ! [ -S /run/nordvpn/nordvpnd.sock ]; then log "Daemon socket missing..."; service nordvpn restart || true; sleep 2; do_connect "reconnect"; LAST_REFRESH=$(date +%s); continue; fi
 
   NOW=$(date +%s)
@@ -671,7 +719,7 @@ while true; do
   # --- LOG STATUS LOGIC ---
   if [ "$LOG_STATUS_INTERVAL" -gt 0 ]; then ELASPED=$(( (NOW - LAST_STATUS_LOG) / 60 )); if [ "$ELASPED" -ge "$LOG_STATUS_INTERVAL" ]; then STATUS=$(nordvpn status || true); UPTIME=$(echo "$STATUS" | grep -i "Uptime" | awk -F': ' '{print $2}'); TRANSFER=$(echo "$STATUS" | grep -i "Transfer" | awk -F': ' '{print $2}'); log "Session status - Uptime: ${UPTIME:-unknown}, Transfer: ${TRANSFER:-unknown}"; LAST_STATUS_LOG=$NOW; fi; fi
 
-  # --- SPEED-TEST BLOCK (Uses new perform_speed_check function) ---
+  # --- SPEED-TEST BLOCK ---
   if [ "${VPN_SPEED_CHECK_INTERVAL}" -gt 0 ]; then
     ELASPED_SPEED=$(( (NOW - LAST_SPEED_TEST) / 60 ))
     if [ "$ELASPED_SPEED" -ge "${VPN_SPEED_CHECK_INTERVAL}" ]; then
@@ -681,32 +729,46 @@ while true; do
   fi
   # --- END SPEED-TEST BLOCK ---
 
-  # --- STANDARD RECONNECT LOGIC ---
+  # --- STANDARD RECONNECT LOGIC & WATCHDOG ---
+  
   STATUS=$(nordvpn status || true)
+  
+  # 1. Check if connected status is reported
   if ! echo "$STATUS" | grep -q "Status: Connected"; then
     log "VPN not connected -> reconnecting..."
-
-    # Conntrack hier leeren
-    log "INFO: Flushing conntrack before reconnect..."
+    # Reconnect logic (flush conntrack, reset server if needed)
     if command -v conntrack >/dev/null; then conntrack -F; fi
-
-    reconnect_server=""
-    if [[ "${VPN_AUTO_CONNECT}" == "best" && -s $BEST_SERVER_CACHE_FILE ]]; then
-      reconnect_server=$(cat "$BEST_SERVER_CACHE_FILE")
-      log "Using pre-cached best server for reconnect: ${reconnect_server}"
-      VPN_SERVER="$reconnect_server"
-      nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
-      do_connect
-    else
-      # Fallback to the old method
-      nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
-      do_connect "reconnect"
-    fi
+    nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
+    do_connect "reconnect"
     continue
   fi
 
-  # --- STANDARD CONNECTIVITY CHECK ---
-  SUCCESS=0; attempt=0
-  while [ "$attempt" -lt "$RETRY_COUNT" ]; do attempt=$((attempt+1)); if curl -s --max-time 10 https://www.google.com > /dev/null; then SUCCESS=1; break; fi; [ "$attempt" -lt "$RETRY_COUNT" ] && sleep "$RETRY_DELAY"; done
-  if [ "$SUCCESS" -eq 0 ]; then log "Connectivity check FAILED -> reconnecting..."; nordvpn disconnect 2>&1 | grep -v "How would you rate" || true; do_connect "reconnect"; continue; fi
+  # 2. WATCHDOG: Check Connection Quality (Packet Loss / Latency)
+  # This replaces the old curl check. It detects "zombie" connections.
+  SUCCESS=0
+  attempt=0
+  while [ "$attempt" -lt "$RETRY_COUNT" ]; do
+      attempt=$((attempt+1))
+      
+      if check_connection_quality; then
+          SUCCESS=1
+          break
+      fi
+      
+      if [ "$attempt" -lt "$RETRY_COUNT" ]; then
+          debug_log "Watchdog check failed (Attempt $attempt/$RETRY_COUNT). Retrying in $RETRY_DELAY seconds..."
+          sleep "$RETRY_DELAY"
+      fi
+  done
+
+  if [ "$SUCCESS" -eq 0 ]; then
+      log "Watchdog FAILED (High Packet Loss or Latency) -> Triggering Reconnect..."
+      nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
+      
+      # Important: If this happens, the current server is bad. 
+      # A standard reconnect usually picks a new server.
+      do_connect "reconnect"
+      continue
+  fi
+  
 done
