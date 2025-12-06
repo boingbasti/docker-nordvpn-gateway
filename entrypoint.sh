@@ -440,14 +440,14 @@ check_connection_quality() {
     # 1. Check for ANY Packet Loss (Strict Watchdog)
     # If 100% loss -> Dead. If > 0% loss -> Unstable.
     if ! echo "$ping_out" | grep -q "0% packet loss"; then
-        log "Watchdog: Packet loss detected! Connection unstable or dead."
+        debug_log "Watchdog: Packet loss detected! Connection unstable or dead."
         return 1
     fi
     
     # 2. Check Latency (Lag Watchdog)
     # Threshold: 600ms (High latency but generous enough to avoid false positives)
     if [ -n "$avg_rtt" ] && [ "$avg_rtt" -gt 600 ]; then
-        log "Watchdog: Latency too high (${avg_rtt}ms)."
+        debug_log "Watchdog: Latency too high (${avg_rtt}ms)."
         return 1
     fi
     
@@ -588,7 +588,7 @@ do_connect() {
     DETECTED_MTU=$(detect_mtu_for_iface "$IFACE")
     [ -n "$DETECTED_MTU" ] && apply_mtu "$IFACE" "$DETECTED_MTU"
 
-    # WG-Bypass rules apply here
+    # WG-Bypass rules apply here (Inside the function for reconnects)
     apply_wg_bypass_rules
 
   else
@@ -610,9 +610,6 @@ do_connect() {
 }
 
 do_connect
-
-# WireGuard Server Bypass
-apply_wg_bypass_rules
 
 # --- Log wg-easy Hooks ---
 if [[ "${SHOW_WGHOOKS,,}" == "on" ]]; then
@@ -752,21 +749,28 @@ while true; do
       
       if check_connection_quality; then
           SUCCESS=1
+          
+          # NEW: Silent Healing Feedback (only visible in debug)
+          if [ "$attempt" -gt 1 ]; then
+              debug_log "✅ Watchdog: Connection recovered on attempt $attempt. False alarm."
+          fi
           break
       fi
       
+      # Warning only in debug, to keep main log clean unless it fails completely
       if [ "$attempt" -lt "$RETRY_COUNT" ]; then
-          debug_log "Watchdog check failed (Attempt $attempt/$RETRY_COUNT). Retrying in $RETRY_DELAY seconds..."
+          debug_log "⚠️ Watchdog: Connection issue detected (Attempt $attempt/$RETRY_COUNT). Retrying in $RETRY_DELAY seconds..."
           sleep "$RETRY_DELAY"
       fi
   done
 
   if [ "$SUCCESS" -eq 0 ]; then
-      log "Watchdog FAILED (High Packet Loss or Latency) -> Triggering Reconnect..."
+      log "❌ Watchdog FAILED (High Packet Loss or Latency) -> Triggering Reconnect..."
       nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
       
       # Important: If this happens, the current server is bad. 
-      # A standard reconnect usually picks a new server.
+      # Ideally, we should treat this like a speed test fail.
+      # For now, a standard reconnect usually picks a new server.
       do_connect "reconnect"
       continue
   fi
