@@ -193,6 +193,11 @@ apply_iptables() {
   local IFACE="$1"
   if [ -z "$IFACE" ]; then return; fi
   log "Applying iptables rules (iface=$IFACE)..."
+  
+  # --- NEU: Erlaube Zugriff auf das Dashboard (Port 1337) ---
+  iptables -I INPUT -p tcp --dport 1337 -j ACCEPT
+  # ---------------------------------------------------------
+
   # Iterate through comma-separated subnets
   for subnet in ${ALLOWLIST_SUBNET//,/ }; do
     debug_log "--> Allowing FORWARD and MASQUERADE for subnet: ${subnet}"
@@ -418,6 +423,10 @@ perform_speed_check() {
     nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
     do_connect "reconnect"
     
+    # --- NEU: Liste sofort neu füllen! ---
+    log "Refilling candidate list in background..."
+    (find_best_server > /dev/null &) 
+    
   else
     debug_log "Speed check PASSED."
   fi
@@ -606,7 +615,9 @@ do_connect() {
 
   local VPN_IP
   VPN_IP=$(curl -s https://ipinfo.io/ip || echo "unknown")
-  log "Connected. WAN IP: $VPN_IP"
+  
+  # --- NEW: Central Success Message ---
+  log "✅ VPN connection established. Current WAN IP: $VPN_IP"
 }
 
 do_connect
@@ -672,10 +683,7 @@ LAST_SPEED_TEST=$(date +%s)
 # --- Loop ---
 while true; do
   sleep "${CHECK_INTERVAL}"
-  
-  # --- DEBUG LOGGING ---
   if [ "$DEBUG" = "on" ]; then ping_output=$(ping -c 1 -w 3 1.1.1.1 2>&1 || true); if [ -n "$ping_output" ]; then printf '%s\n' "$ping_output" | while IFS= read -r line; do debug_log "Keep-alive ping: $line"; done; else debug_log "Keep-alive ping: FAILED (no output)"; fi; else ping -c 1 -w 3 1.1.1.1 > /dev/null 2>&1 || true; fi
-  
   if ! [ -S /run/nordvpn/nordvpnd.sock ]; then log "Daemon socket missing..."; service nordvpn restart || true; sleep 2; do_connect "reconnect"; LAST_REFRESH=$(date +%s); continue; fi
 
   NOW=$(date +%s)
@@ -716,7 +724,7 @@ while true; do
   # --- LOG STATUS LOGIC ---
   if [ "$LOG_STATUS_INTERVAL" -gt 0 ]; then ELASPED=$(( (NOW - LAST_STATUS_LOG) / 60 )); if [ "$ELASPED" -ge "$LOG_STATUS_INTERVAL" ]; then STATUS=$(nordvpn status || true); UPTIME=$(echo "$STATUS" | grep -i "Uptime" | awk -F': ' '{print $2}'); TRANSFER=$(echo "$STATUS" | grep -i "Transfer" | awk -F': ' '{print $2}'); log "Session status - Uptime: ${UPTIME:-unknown}, Transfer: ${TRANSFER:-unknown}"; LAST_STATUS_LOG=$NOW; fi; fi
 
-  # --- SPEED-TEST BLOCK ---
+  # --- SPEED-TEST BLOCK (Uses new perform_speed_check function) ---
   if [ "${VPN_SPEED_CHECK_INTERVAL}" -gt 0 ]; then
     ELASPED_SPEED=$(( (NOW - LAST_SPEED_TEST) / 60 ))
     if [ "$ELASPED_SPEED" -ge "${VPN_SPEED_CHECK_INTERVAL}" ]; then
@@ -726,22 +734,41 @@ while true; do
   fi
   # --- END SPEED-TEST BLOCK ---
 
-  # --- STANDARD RECONNECT LOGIC & WATCHDOG ---
-  
+  # --- STANDARD RECONNECT LOGIC ---
   STATUS=$(nordvpn status || true)
-  
-  # 1. Check if connected status is reported
   if ! echo "$STATUS" | grep -q "Status: Connected"; then
     log "VPN not connected -> reconnecting..."
-    # Reconnect logic (flush conntrack, reset server if needed)
+
+    # Conntrack hier leeren
+    log "INFO: Flushing conntrack before reconnect..."
     if command -v conntrack >/dev/null; then conntrack -F; fi
-    nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
-    do_connect "reconnect"
+
+    reconnect_server=""
+    if [[ "${VPN_AUTO_CONNECT}" == "best" && -s $BEST_SERVER_CACHE_FILE ]]; then
+      reconnect_server=$(cat "$BEST_SERVER_CACHE_FILE")
+      log "Using pre-cached best server for reconnect: ${reconnect_server}"
+      VPN_SERVER="$reconnect_server"
+      nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
+      do_connect
+    else
+      # Fallback to the old method
+      nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
+      do_connect "reconnect"
+    fi
+
+    # --- NEU: Sofortige Prüfung nach dem Reconnect ---
+    # Wir stellen sicher, dass die neue Verbindung auch Leistung bringt.
+    if [ "${VPN_SPEED_CHECK_INTERVAL}" -gt 0 ]; then
+        log "Verifying connection speed after reconnect (in 15s)..."
+        sleep 15
+        perform_speed_check
+    fi
+    # -------------------------------------------------
+
     continue
   fi
 
-  # 2. WATCHDOG: Check Connection Quality (Packet Loss / Latency)
-  # This replaces the old curl check. It detects "zombie" connections.
+  # --- STANDARD CONNECTIVITY CHECK (The Watchdog) ---
   SUCCESS=0
   attempt=0
   while [ "$attempt" -lt "$RETRY_COUNT" ]; do
@@ -767,12 +794,7 @@ while true; do
   if [ "$SUCCESS" -eq 0 ]; then
       log "❌ Watchdog FAILED (High Packet Loss or Latency) -> Triggering Reconnect..."
       nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
-      
-      # Important: If this happens, the current server is bad. 
-      # Ideally, we should treat this like a speed test fail.
-      # For now, a standard reconnect usually picks a new server.
       do_connect "reconnect"
       continue
   fi
-  
 done
