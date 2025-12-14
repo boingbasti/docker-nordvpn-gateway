@@ -368,8 +368,9 @@ perform_speed_check() {
   local MIN_SPEED_BYTES=$(( VPN_MIN_SPEED * 125000 ))
   
   # Run test
+  # FIX r5: Sanitize output to ensure it is always a single integer, avoiding 'integer expression expected' errors on failure.
   local CURRENT_SPEED
-  CURRENT_SPEED=$(curl -w '%{speed_download}\n' -o /dev/null -s --max-time 20 "$SPEED_TEST_URL" | cut -d'.' -f1 || echo 0)
+  CURRENT_SPEED=$(curl -w '%{speed_download}\n' -o /dev/null -s --max-time 20 "$SPEED_TEST_URL" | cut -d'.' -f1 | grep -oE '^[0-9]+' | head -n1 || echo 0)
   
   debug_log "Speed test result: ${CURRENT_SPEED} Bytes/s."
 
@@ -683,7 +684,10 @@ LAST_SPEED_TEST=$(date +%s)
 # --- Loop ---
 while true; do
   sleep "${CHECK_INTERVAL}"
+  
+  # --- DEBUG LOGGING ---
   if [ "$DEBUG" = "on" ]; then ping_output=$(ping -c 1 -w 3 1.1.1.1 2>&1 || true); if [ -n "$ping_output" ]; then printf '%s\n' "$ping_output" | while IFS= read -r line; do debug_log "Keep-alive ping: $line"; done; else debug_log "Keep-alive ping: FAILED (no output)"; fi; else ping -c 1 -w 3 1.1.1.1 > /dev/null 2>&1 || true; fi
+  
   if ! [ -S /run/nordvpn/nordvpnd.sock ]; then log "Daemon socket missing..."; service nordvpn restart || true; sleep 2; do_connect "reconnect"; LAST_REFRESH=$(date +%s); continue; fi
 
   NOW=$(date +%s)
@@ -724,7 +728,7 @@ while true; do
   # --- LOG STATUS LOGIC ---
   if [ "$LOG_STATUS_INTERVAL" -gt 0 ]; then ELASPED=$(( (NOW - LAST_STATUS_LOG) / 60 )); if [ "$ELASPED" -ge "$LOG_STATUS_INTERVAL" ]; then STATUS=$(nordvpn status || true); UPTIME=$(echo "$STATUS" | grep -i "Uptime" | awk -F': ' '{print $2}'); TRANSFER=$(echo "$STATUS" | grep -i "Transfer" | awk -F': ' '{print $2}'); log "Session status - Uptime: ${UPTIME:-unknown}, Transfer: ${TRANSFER:-unknown}"; LAST_STATUS_LOG=$NOW; fi; fi
 
-  # --- SPEED-TEST BLOCK (Uses new perform_speed_check function) ---
+  # --- SPEED-TEST BLOCK ---
   if [ "${VPN_SPEED_CHECK_INTERVAL}" -gt 0 ]; then
     ELASPED_SPEED=$(( (NOW - LAST_SPEED_TEST) / 60 ))
     if [ "$ELASPED_SPEED" -ge "${VPN_SPEED_CHECK_INTERVAL}" ]; then
