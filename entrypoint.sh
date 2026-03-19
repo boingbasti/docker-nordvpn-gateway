@@ -123,7 +123,7 @@ WIREGUARD_SUBNET=${WIREGUARD_SUBNET:-}
 # Defaults for logging hooks
 SHOW_WGHOOKS=${SHOW_WGHOOKS:-off}
 # Speed Test Defaults
-VPN_SPEED_CHECK_INTERVAL=${VPN_SPEED_CHECK_INTERVAL:-0} # In Minuten, 0 = deaktiviert
+VPN_SPEED_CHECK_INTERVAL=${VPN_SPEED_CHECK_INTERVAL:-0} # In minutes, 0 = disabled
 VPN_MIN_SPEED=${VPN_MIN_SPEED:-5} # In MBit/s
 SPEED_TEST_URL=${SPEED_TEST_URL:-"http://cachefly.cachefly.net/10mb.test"}
 THREAT_PROTECTION_LITE=${THREAT_PROTECTION_LITE:-off}
@@ -194,10 +194,6 @@ apply_iptables() {
   if [ -z "$IFACE" ]; then return; fi
   log "Applying iptables rules (iface=$IFACE)..."
   
-  # --- NEU: Erlaube Zugriff auf das Dashboard (Port 1337) ---
-  iptables -I INPUT -p tcp --dport 1337 -j ACCEPT
-  # ---------------------------------------------------------
-
   # Iterate through comma-separated subnets
   for subnet in ${ALLOWLIST_SUBNET//,/ }; do
     debug_log "--> Allowing FORWARD and MASQUERADE for subnet: ${subnet}"
@@ -248,7 +244,7 @@ apply_wg_bypass_rules() {
     fi
   fi
 }
-# --- ENDE FUNKTION ---
+# --- END FUNCTION ---
 
 apply_mtu() { IFACE="$1"; MTU_VAL="$2"; if [ -n "$IFACE" ] && [[ "$MTU_VAL" =~ ^[0-9]+$ ]]; then log "Setting MTU $MTU_VAL on $IFACE..."; ip link set dev "$IFACE" mtu "$MTU_VAL" || true; fi; }
 
@@ -377,7 +373,7 @@ perform_speed_check() {
   if [ "$CURRENT_SPEED" -lt "$MIN_SPEED_BYTES" ] && [ "$CURRENT_SPEED" -ne 0 ]; then
     log "WARNING: Speed check FAILED. Speed (${CURRENT_SPEED} B/s) < Threshold (${MIN_SPEED_BYTES} B/s)."
     
-    # 1. Check for candidates (Thronfolger)
+    # 1. Check for candidates (successors)
     if [ -s "$SERVER_CANDIDATES_FILE" ]; then
         # Identify current server ID from status
         local current_server_id
@@ -424,7 +420,7 @@ perform_speed_check() {
     nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
     do_connect "reconnect"
     
-    # --- NEU: Liste sofort neu füllen! ---
+    # --- NEW: Immediately refill candidate list! ---
     log "Refilling candidate list in background..."
     (find_best_server > /dev/null &) 
     
@@ -614,11 +610,8 @@ do_connect() {
     log "Threat Protection Lite is active. Trusting client DNS settings in resolv.conf."
   fi
 
-  local VPN_IP
-  VPN_IP=$(curl -s https://ipinfo.io/ip || echo "unknown")
-  
   # --- NEW: Central Success Message ---
-  log "✅ VPN connection established. Current WAN IP: $VPN_IP"
+  log "VPN connection established."
 }
 
 do_connect
@@ -694,8 +687,8 @@ while true; do
 
   # --- ADVANCED REFRESH LOGIC ---
   if [ "${VPN_REFRESH}" -gt 0 ]; then
-    ELASPED=$(( (NOW - LAST_REFRESH) / 60 ))
-    if [ "$ELASPED" -ge "${VPN_REFRESH}" ]; then
+    ELAPSED=$(( (NOW - LAST_REFRESH) / 60 ))
+    if [ "$ELAPSED" -ge "${VPN_REFRESH}" ]; then
       
       log "INFO: Flushing conntrack before forced refresh..."
       if command -v conntrack >/dev/null; then conntrack -F; fi
@@ -726,12 +719,12 @@ while true; do
   fi
 
   # --- LOG STATUS LOGIC ---
-  if [ "$LOG_STATUS_INTERVAL" -gt 0 ]; then ELASPED=$(( (NOW - LAST_STATUS_LOG) / 60 )); if [ "$ELASPED" -ge "$LOG_STATUS_INTERVAL" ]; then STATUS=$(nordvpn status || true); UPTIME=$(echo "$STATUS" | grep -i "Uptime" | awk -F': ' '{print $2}'); TRANSFER=$(echo "$STATUS" | grep -i "Transfer" | awk -F': ' '{print $2}'); log "Session status - Uptime: ${UPTIME:-unknown}, Transfer: ${TRANSFER:-unknown}"; LAST_STATUS_LOG=$NOW; fi; fi
+  if [ "$LOG_STATUS_INTERVAL" -gt 0 ]; then ELAPSED=$(( (NOW - LAST_STATUS_LOG) / 60 )); if [ "$ELAPSED" -ge "$LOG_STATUS_INTERVAL" ]; then STATUS=$(nordvpn status || true); UPTIME=$(echo "$STATUS" | grep -i "Uptime" | awk -F': ' '{print $2}'); TRANSFER=$(echo "$STATUS" | grep -i "Transfer" | awk -F': ' '{print $2}'); log "Session status - Uptime: ${UPTIME:-unknown}, Transfer: ${TRANSFER:-unknown}"; LAST_STATUS_LOG=$NOW; fi; fi
 
   # --- SPEED-TEST BLOCK ---
   if [ "${VPN_SPEED_CHECK_INTERVAL}" -gt 0 ]; then
-    ELASPED_SPEED=$(( (NOW - LAST_SPEED_TEST) / 60 ))
-    if [ "$ELASPED_SPEED" -ge "${VPN_SPEED_CHECK_INTERVAL}" ]; then
+    ELAPSED_SPEED=$(( (NOW - LAST_SPEED_TEST) / 60 ))
+    if [ "$ELAPSED_SPEED" -ge "${VPN_SPEED_CHECK_INTERVAL}" ]; then
       perform_speed_check
       LAST_SPEED_TEST=$NOW
     fi
@@ -743,7 +736,7 @@ while true; do
   if ! echo "$STATUS" | grep -q "Status: Connected"; then
     log "VPN not connected -> reconnecting..."
 
-    # Conntrack hier leeren
+    # Flush conntrack table
     log "INFO: Flushing conntrack before reconnect..."
     if command -v conntrack >/dev/null; then conntrack -F; fi
 
@@ -760,8 +753,8 @@ while true; do
       do_connect "reconnect"
     fi
 
-    # --- NEU: Sofortige Prüfung nach dem Reconnect ---
-    # Wir stellen sicher, dass die neue Verbindung auch Leistung bringt.
+    # --- NEW: Immediate speed check after reconnect ---
+    # Ensure the new connection actually delivers performance.
     if [ "${VPN_SPEED_CHECK_INTERVAL}" -gt 0 ]; then
         log "Verifying connection speed after reconnect (in 15s)..."
         sleep 15

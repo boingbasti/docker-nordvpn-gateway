@@ -68,7 +68,6 @@ Then visit: **[http://localhost:8080](http://localhost:8080)**
 Creates a SOCKS5 proxy routed fully through the VPN. No special network setup required.
 
 ```yaml
-version: "3.9"
 services:
   vpn:
     image: boingbasti/nordvpn-gateway:latest
@@ -152,7 +151,6 @@ networks:
 Includes: Gateway + WireGuard Server (wg-easy) + AdGuard Home + Proxies.
 
 ```yaml
-version: "3.9"
 services:
   vpn:
     image: boingbasti/nordvpn-gateway:latest
@@ -203,6 +201,7 @@ services:
   socks5:
     image: boingbasti/nordvpn-socks5:latest
     network_mode: "service:vpn"
+    depends_on: [vpn]
     environment:
       - PROXY_PORT=1080
       - ALLOWED_IPS=192.168.1.0/24
@@ -211,11 +210,13 @@ services:
   privoxy:
     image: boingbasti/nordvpn-privoxy:latest
     network_mode: "service:vpn"
+    depends_on: [vpn]
     restart: unless-stopped
 
   adguardhome:
     image: adguard/adguardhome:latest
     network_mode: "service:vpn"
+    depends_on: [vpn]
     volumes:
       - ./adguard-work:/opt/adguardhome/work
       - ./adguard-config:/opt/adguardhome/conf
@@ -231,8 +232,8 @@ networks:
 ## ⚙️ Environment Variables
 
 ### 1) Basic VPN Connection
-| Variable | Default | Options | Example | Description |
-|---|---|---|---|---|
+| Variable | Default | Description |
+|---|---|---|
 | `NORDVPN_TOKEN` | *required* | Auth token (use secret mount if possible). |
 | `VPN_COUNTRY` | Germany | Target region. |
 | `VPN_GROUP` | p2p | Server group. Use `standard` for normal servers. |
@@ -269,7 +270,7 @@ networks:
 | `VPN_BEST_SERVER_CHECK_INTERVAL` | 30 | `15` | Minutes between best‑server refresh. |
 | `VPN_SPEED_CHECK_INTERVAL` | 0 | `60` | Minutes between throughput checks. |
 | `VPN_MIN_SPEED` | 5 | `20` | Minimum Mbit/s before rotating to next candidate. |
-| `SPEED_TEST_URL` | (Default) | `http://cachefly.../100mb.test` | URL for speed tests. Use 100MB file for Gigabit lines. |
+| `SPEED_TEST_URL` | `http://cachefly.cachefly.net/10mb.test` | `http://cachefly.../100mb.test` | URL for speed tests. Use 100MB file for Gigabit lines. |
 | `CHECK_INTERVAL` | 60 | `30` | Loop check frequency (seconds). |
 | `RETRY_COUNT` | 2 | `3` | Retry attempts before reconnect. |
 | `RETRY_DELAY` | 2 | `2` | Seconds between retries. |
