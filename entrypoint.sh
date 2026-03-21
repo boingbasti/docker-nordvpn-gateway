@@ -354,6 +354,7 @@ background_best_server_updater() {
 
 # --- Shared Speed Test & Candidate Rotation Logic ---
 perform_speed_check() {
+  local context="${1:-}"  # "reconnect" or "startup" suppresses ✅ Server switch (caller handles it)
   # If speed check is disabled (interval=0) and we are not forcing it (e.g. startup), skip.
   # But we want to use min_speed as a threshold anyway.
   if [ "${VPN_MIN_SPEED}" -le 0 ]; then return; fi
@@ -371,7 +372,7 @@ perform_speed_check() {
   debug_log "Speed test result: ${CURRENT_SPEED} Bytes/s."
 
   if [ "$CURRENT_SPEED" -lt "$MIN_SPEED_BYTES" ] && [ "$CURRENT_SPEED" -ne 0 ]; then
-    log "WARNING: Speed check FAILED. Speed (${CURRENT_SPEED} B/s) < Threshold (${MIN_SPEED_BYTES} B/s)."
+    log "WARNING: Speed check failed. Speed (${CURRENT_SPEED} B/s) < Threshold (${MIN_SPEED_BYTES} B/s)."
     
     # 1. Check for candidates (successors)
     if [ -s "$SERVER_CANDIDATES_FILE" ]; then
@@ -397,14 +398,18 @@ perform_speed_check() {
             
             nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
             do_connect # Reconnect using VPN_SERVER variable
-            
+            if [ -z "$context" ]; then
+                SWITCH_IP=$(curl -s --max-time 5 https://ipinfo.io/ip || echo "unknown")
+                log "✅ Server switch complete. VPN connection stable. Current WAN IP: ${SWITCH_IP}"
+            fi
+
             # --- NEW: Verify the new candidate recursively ---
             log "Verifying speed of new candidate in 15 seconds..."
             sleep 15
-            perform_speed_check
+            perform_speed_check "$context"
             return # Exit this instance of the function
         else
-             log "No valid candidates left in list."
+            log "No valid candidates left in list."
         fi
     fi
 
@@ -425,7 +430,7 @@ perform_speed_check() {
     (find_best_server > /dev/null &) 
     
   else
-    debug_log "Speed check PASSED."
+    debug_log "Speed check passed."
   fi
 }
 
@@ -652,7 +657,7 @@ fi
 if [ "${VPN_SPEED_CHECK_INTERVAL}" -gt 0 ]; then
     log "Initializing immediate startup speed check (in 15s)..."
     sleep 15
-    perform_speed_check
+    perform_speed_check "startup"
     
     # --- NEW: Final Success Message ---
     # We fetch the IP again to confirm everything is routed correctly after the test
@@ -679,9 +684,18 @@ while true; do
   sleep "${CHECK_INTERVAL}"
   
   # --- DEBUG LOGGING ---
-  if [ "$DEBUG" = "on" ]; then ping_output=$(ping -c 1 -w 3 1.1.1.1 2>&1 || true); if [ -n "$ping_output" ]; then printf '%s\n' "$ping_output" | while IFS= read -r line; do debug_log "Keep-alive ping: $line"; done; else debug_log "Keep-alive ping: FAILED (no output)"; fi; else ping -c 1 -w 3 1.1.1.1 > /dev/null 2>&1 || true; fi
+  if [ "$DEBUG" = "on" ]; then ping_output=$(ping -c 1 -w 3 1.1.1.1 2>&1 || true); if [ -n "$ping_output" ]; then printf '%s\n' "$ping_output" | while IFS= read -r line; do debug_log "Keep-alive ping: $line"; done; else debug_log "Keep-alive ping: failed (no output)"; fi; else ping -c 1 -w 3 1.1.1.1 > /dev/null 2>&1 || true; fi
   
-  if ! [ -S /run/nordvpn/nordvpnd.sock ]; then log "Daemon socket missing..."; service nordvpn restart || true; sleep 2; do_connect "reconnect"; LAST_REFRESH=$(date +%s); continue; fi
+  if ! [ -S /run/nordvpn/nordvpnd.sock ]; then
+    log "Daemon socket missing..."
+    service nordvpn restart || true
+    sleep 2
+    do_connect "reconnect"
+    RECONNECT_IP=$(curl -s --max-time 5 https://ipinfo.io/ip || echo "unknown")
+    log "✅ Reconnect complete. VPN connection stable. Current WAN IP: ${RECONNECT_IP}"
+    LAST_REFRESH=$(date +%s)
+    continue
+  fi
 
   NOW=$(date +%s)
 
@@ -703,7 +717,7 @@ while true; do
         if [[ -n "$best_server_found" ]]; then
           log "New best server found: ${best_server_found}. Connecting..."
           VPN_SERVER="$best_server_found"
-          do_connect
+          do_connect "reconnect"
         else
           log "WARNING: Could not find a new 'best' server. Using default reconnect method."
           do_connect "reconnect"
@@ -713,6 +727,8 @@ while true; do
         nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
         do_connect "reconnect"
       fi
+      RECONNECT_IP=$(curl -s --max-time 5 https://ipinfo.io/ip || echo "unknown")
+      log "✅ Reconnect complete. VPN connection stable. Current WAN IP: ${RECONNECT_IP}"
       LAST_REFRESH=$NOW
       continue
     fi
@@ -746,7 +762,7 @@ while true; do
       log "Using pre-cached best server for reconnect: ${reconnect_server}"
       VPN_SERVER="$reconnect_server"
       nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
-      do_connect
+      do_connect "reconnect"
     else
       # Fallback to the old method
       nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
@@ -758,10 +774,12 @@ while true; do
     if [ "${VPN_SPEED_CHECK_INTERVAL}" -gt 0 ]; then
         log "Verifying connection speed after reconnect (in 15s)..."
         sleep 15
-        perform_speed_check
+        perform_speed_check "reconnect"
     fi
     # -------------------------------------------------
 
+    RECONNECT_IP=$(curl -s --max-time 5 https://ipinfo.io/ip || echo "unknown")
+    log "✅ Reconnect complete. VPN connection stable. Current WAN IP: ${RECONNECT_IP}"
     continue
   fi
 
@@ -792,6 +810,8 @@ while true; do
       log "❌ Watchdog FAILED (High Packet Loss or Latency) -> Triggering Reconnect..."
       nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
       do_connect "reconnect"
+      RECONNECT_IP=$(curl -s --max-time 5 https://ipinfo.io/ip || echo "unknown")
+      log "✅ Reconnect complete. VPN connection stable. Current WAN IP: ${RECONNECT_IP}"
       continue
   fi
 done
