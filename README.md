@@ -5,7 +5,7 @@
 
 # 🛡️ NordVPN Gateway Container
 
-> ℹ️ **Under the hood:** Based on **NordVPN Linux Client 4.5.0**
+> ℹ️ **Under the hood:** Based on **NordVPN Linux Client 4.6.0**
 
 A **stable, self-healing, and intelligent** Docker container that turns your host into a secure **NordVPN gateway** for other containers and your entire LAN.
 It supports **WireGuard server integration**, **DNS over VPN** via AdGuard Home, and **SOCKS5 / HTTP proxies**, all routed through NordVPN.
