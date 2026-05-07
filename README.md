@@ -253,6 +253,7 @@ networks:
 |---|---|---|---|
 | `THREAT_PROTECTION_LITE` | off | `on` | Enables DNS-based blocking of ads & threats. |
 | `KILLSWITCH` | on | `on` | Drop all non-VPN traffic to prevent leaks. |
+| `LAN_DISCOVERY` | off | `on` | Allow LAN access while VPN is active. |
 | `POST_QUANTUM` | on | `off` | Enable/disable post-quantum encryption support. |
 
 ### 4) WireGuard Bypass (macvlan only)

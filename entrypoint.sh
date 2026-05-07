@@ -110,6 +110,7 @@ VPN_TECHNOLOGY=${VPN_TECHNOLOGY:-NordLynx}
 PROTOCOL=${PROTOCOL:-}
 KILLSWITCH=${KILLSWITCH:-on}
 POST_QUANTUM=${POST_QUANTUM:-on}
+LAN_DISCOVERY=${LAN_DISCOVERY:-off}
 VPN_COUNTRY=${VPN_COUNTRY:-Germany}
 VPN_SERVER=${VPN_SERVER:-}
 VPN_GROUP=${VPN_GROUP:-p2p}
@@ -540,6 +541,7 @@ log "Logging in with token..."
 nordvpn login --token "$TOKEN" 2>&1 | grep -v -E "Welcome|By default|To limit" || true
 nordvpn set killswitch "${KILLSWITCH}" || true
 nordvpn set pq "${POST_QUANTUM}" || true
+nordvpn set lan-discovery "${LAN_DISCOVERY}" || true
 
 # --- Feature Settings ---
 nordvpn set notify off || true
