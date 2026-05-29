@@ -52,6 +52,7 @@ cleanup() {
     cleanup_iptables "$IFACE"
   fi
 
+
   log "Disconnecting from NordVPN..."
   nordvpn disconnect &> /dev/null || true
 
@@ -228,7 +229,7 @@ apply_wg_bypass_rules() {
     else
       log "WireGuard server bypass enabled. Re-applying rules for server $WIREGUARD_SERVER_IP and subnet $WIREGUARD_SUBNET..."
 
-      # 1. Route for the return path (for data traffic)
+      # Route for the return path (for data traffic)
       if ! ip route show | grep -q "${WIREGUARD_SUBNET} via ${WIREGUARD_SERVER_IP}"; then
         debug_log "--> Adding route for WireGuard subnet ${WIREGUARD_SUBNET}..."
         ip route add "${WIREGUARD_SUBNET}" via "${WIREGUARD_SERVER_IP}"
@@ -236,11 +237,6 @@ apply_wg_bypass_rules() {
         debug_log "--> Route for WireGuard subnet already exists."
       fi
 
-      # 2. "VIP Pass" for the Killswitch (for the handshake)
-      debug_log "--> (Re)applying iptables mangle rule for Killswitch bypass..."
-      iptables -t mangle -D PREROUTING -s "$WIREGUARD_SERVER_IP" -j MARK --set-xmark 0xe1f1 2>/dev/null || true
-      iptables -t mangle -I PREROUTING 1 -s "$WIREGUARD_SERVER_IP" -j MARK --set-xmark 0xe1f1
-      
       log "WireGuard bypass rules successfully applied."
     fi
   fi
@@ -636,19 +632,19 @@ if [[ "${SHOW_WGHOOKS,,}" == "on" ]]; then
         log "--- Variant 1: WITH Local Network Access ---"
         echo ""
         log "PostUp:"
-        echo "ip route add 0.0.0.0/1 via ${GATEWAY_IP}; ip route add 128.0.0.0/1 via ${GATEWAY_IP}; iptables -A FORWARD -i wg0 -j ACCEPT; iptables -A FORWARD -o wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -s ${WIREGUARD_SUBNET} -d ${LAN_SUBNET} -o eth0 -j MASQUERADE"
+        echo "ip rule add iif wg0 table 100; ip route add default via ${GATEWAY_IP} table 100; iptables -A FORWARD -i wg0 -j ACCEPT; iptables -A FORWARD -o wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -s ${WIREGUARD_SUBNET} -d ${LAN_SUBNET} -o eth0 -j MASQUERADE"
         echo ""
         log "PostDown:"
-        echo "ip route del 0.0.0.0/1; ip route del 128.0.0.0/1; iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -s ${WIREGUARD_SUBNET} -d ${LAN_SUBNET} -o eth0 -j MASQUERADE"
+        echo "ip rule del iif wg0 table 100; ip route del default via ${GATEWAY_IP} table 100; iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -s ${WIREGUARD_SUBNET} -d ${LAN_SUBNET} -o eth0 -j MASQUERADE"
         echo ""
-        
+
         log "--- Variant 2: WITHOUT Local Network Access (Internet Only) ---"
         echo ""
         log "PostUp:"
-        echo "ip route del default; ip route add default via ${GATEWAY_IP}; iptables -A FORWARD -i wg0 -j ACCEPT; iptables -A FORWARD -o wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE"
+        echo "ip rule add iif wg0 table 100; ip route add default via ${GATEWAY_IP} table 100; iptables -A FORWARD -i wg0 -j ACCEPT; iptables -A FORWARD -o wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE"
         echo ""
         log "PostDown:"
-        echo "iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE"
+        echo "ip rule del iif wg0 table 100; ip route del default via ${GATEWAY_IP} table 100; iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE"
         echo ""
     fi
     log "--- End of recommended hooks ---"
