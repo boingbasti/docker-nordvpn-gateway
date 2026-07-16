@@ -5,7 +5,11 @@ LABEL maintainer="boingbasti" \
       version="2.0-stable"
 
 # Install dependencies
-RUN apt-get update && \
+# QEMU arm/v7 buildx blocks port 80 (HTTP) to ports.ubuntu.com — switch to HTTPS.
+# TLS verification is disabled only for the bootstrap step (ca-certificates not yet installed).
+RUN sed -i 's|http://ports.ubuntu.com|https://ports.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true && \
+    apt-get -o Acquire::https::Verify-Peer=false update && \
+    apt-get -o Acquire::https::Verify-Peer=false install -y --no-install-recommends ca-certificates && \
     apt-get install -y --no-install-recommends \
       curl \
       wget \
@@ -17,7 +21,12 @@ RUN apt-get update && \
       iputils-ping \
       jq \
       conntrack \
-      ca-certificates && \
+      libicu74 \
+      libxml2 \
+      libnl-3-200 \
+      libnl-genl-3-200 \
+      libxslt1.1 \
+      xsltproc && \
     # Add NordVPN repo key and list
     wget -qO /etc/apt/trusted.gpg.d/nordvpn_public.asc https://repo.nordvpn.com/gpg/nordvpn_public.asc && \
     echo "deb https://repo.nordvpn.com/deb/nordvpn/debian stable main" > /etc/apt/sources.list.d/nordvpn.list && \
