@@ -364,7 +364,8 @@ perform_speed_check() {
   # Run test
   # FIX r5: Sanitize output to ensure it is always a single integer, avoiding 'integer expression expected' errors on failure.
   local CURRENT_SPEED
-  CURRENT_SPEED=$(curl -w '%{speed_download}\n' -o /dev/null -s --max-time 20 "$SPEED_TEST_URL" | cut -d'.' -f1 | grep -oE '^[0-9]+' | head -n1 || echo 0)
+  CURRENT_SPEED=$(curl -w '%{speed_download}\n' -o /dev/null -s --max-time 20 "$SPEED_TEST_URL" | cut -d'.' -f1 | grep -oE '^[0-9]+' | head -n1)
+  CURRENT_SPEED=${CURRENT_SPEED:-0}
   
   debug_log "Speed test result: ${CURRENT_SPEED} Bytes/s."
 
