@@ -5,7 +5,7 @@
 
 # 🛡️ NordVPN Gateway Container
 
-> ℹ️ **Under the hood:** Based on **NordVPN Linux Client 5.4.0**
+> ℹ️ **Under the hood:** Based on **NordVPN Linux Client 6.0.1**
 
 A **stable, self-healing, and intelligent** Docker container that turns your host into a secure **NordVPN gateway** for other containers and your entire LAN.
 It supports **WireGuard server integration**, **DNS over VPN** via AdGuard Home, and **SOCKS5 / HTTP proxies**, all routed through NordVPN.
@@ -236,10 +236,10 @@ networks:
 |---|---|---|
 | `NORDVPN_TOKEN` | *required* | Auth token (use secret mount if possible). |
 | `VPN_COUNTRY` | Germany | Target region. |
-| `VPN_GROUP` | p2p | Server group. Use `standard` for normal servers. |
+| `VPN_GROUP` | standard | Server group: `standard`, `double_vpn`, `onion_over_vpn`, `obfuscated`, `dedicated_ip`. Since NordVPN 6.x all servers support P2P; `p2p` is treated as `standard`. `obfuscated` automatically switches to NordWhisper; NordWhisper is not available for `double_vpn` / `onion_over_vpn` (falls back to NordLynx). |
 | `VPN_SERVER` | (unset) | Specific server (e.g. de1234). Overrides group. |
-| `VPN_TECHNOLOGY` | NordLynx | NordLynx or OpenVPN. |
-| `PROTOCOL` | (unset) | udp / tcp (OpenVPN only). |
+| `VPN_TECHNOLOGY` | NordLynx | NordLynx, OpenVPN or NordWhisper. |
+| `PROTOCOL` | (unset) | udp / tcp (OpenVPN only, defaults to udp). |
 | `CONNECT_TIMEOUT` | 60 | Connection timeout in seconds. |
 
 ### 2) Gateway & Routing
@@ -251,7 +251,7 @@ networks:
 ### 3) Security & Ad-Blocking
 | Variable | Default | Example | Description |
 |---|---|---|---|
-| `THREAT_PROTECTION_LITE` | off | `on` | Enables DNS-based blocking of ads & threats. |
+| `THREAT_PROTECTION_LITE` | off | `on` | Enables NordVPN real-time protection (blocks scam/phishing domains, reduces ads). |
 | `KILLSWITCH` | on | `on` | Drop all non-VPN traffic to prevent leaks. |
 | `LAN_DISCOVERY` | off | `on` | Allow access to local network devices while killswitch is active. Alternative to `ALLOWLIST_SUBNET` for simple setups. |
 | `POST_QUANTUM` | on | `off` | Enable/disable post-quantum encryption support. |

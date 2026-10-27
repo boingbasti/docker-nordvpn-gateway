@@ -114,7 +114,7 @@ POST_QUANTUM=${POST_QUANTUM:-on}
 LAN_DISCOVERY=${LAN_DISCOVERY:-off}
 VPN_COUNTRY=${VPN_COUNTRY:-Germany}
 VPN_SERVER=${VPN_SERVER:-}
-VPN_GROUP=${VPN_GROUP:-p2p}
+VPN_GROUP=${VPN_GROUP:-standard}
 LOG_STATUS_INTERVAL=${LOG_STATUS_INTERVAL:-0}
 CONNECT_TIMEOUT=${CONNECT_TIMEOUT:-60}
 VPN_AUTO_CONNECT=${VPN_AUTO_CONNECT:-off}
@@ -130,12 +130,44 @@ VPN_MIN_SPEED=${VPN_MIN_SPEED:-5} # In MBit/s
 SPEED_TEST_URL=${SPEED_TEST_URL:-"http://cachefly.cachefly.net/10mb.test"}
 THREAT_PROTECTION_LITE=${THREAT_PROTECTION_LITE:-off}
 
+# --- Compatibility: NordVPN 6.x removed the P2P group (all servers support P2P now) ---
+if [[ "${VPN_GROUP,,}" == "p2p" ]]; then
+  log "Note: The P2P group no longer exists in NordVPN 6.x (all servers support P2P). Using standard servers."
+  VPN_GROUP="standard"
+fi
+
 # --- FIX: Handle 'standard' group ---
 # NordVPN uses no group flag for standard servers, so we clear the variable.
 if [[ "${VPN_GROUP,,}" == "standard" ]]; then
   log "Configured group is 'standard'. Connecting without specific group flag."
   VPN_GROUP=""
 fi
+
+# --- Compatibility: NordVPN 6.x obfuscated servers only work with NordWhisper ---
+if [[ "${VPN_GROUP,,}" == "obfuscated" ]] && [[ "${VPN_TECHNOLOGY,,}" != "nordwhisper" ]]; then
+  log "Note: Obfuscated servers require NordWhisper in NordVPN 6.x. Switching technology from '${VPN_TECHNOLOGY}' to 'NordWhisper'."
+  VPN_TECHNOLOGY="NordWhisper"
+fi
+
+# --- Compatibility: NordWhisper is not offered on Double VPN / Onion over VPN servers ---
+if [[ "${VPN_TECHNOLOGY,,}" == "nordwhisper" ]] && [[ "${VPN_GROUP,,}" == "double_vpn" || "${VPN_GROUP,,}" == "onion_over_vpn" ]]; then
+  log "WARNING: NordWhisper is not available for '${VPN_GROUP}' servers. Switching technology to 'NordLynx'."
+  VPN_TECHNOLOGY="NordLynx"
+fi
+
+# --- Compatibility: NordVPN 6.x merged technology + protocol into 'nordvpn set protocol' ---
+case "${VPN_TECHNOLOGY,,}" in
+  "openvpn")
+    case "${PROTOCOL,,}" in
+      "tcp") VPN_PROTOCOL_ID="openvpn_tcp" ;;
+      ""|"udp") VPN_PROTOCOL_ID="openvpn_udp" ;;
+      *) log "WARNING: Unknown PROTOCOL '${PROTOCOL}'. Falling back to UDP."; VPN_PROTOCOL_ID="openvpn_udp" ;;
+    esac
+    ;;
+  "nordwhisper") VPN_PROTOCOL_ID="nordwhisper" ;;
+  "nordlynx") VPN_PROTOCOL_ID="nordlynx" ;;
+  *) log "WARNING: Unknown VPN_TECHNOLOGY '${VPN_TECHNOLOGY}'. Falling back to NordLynx."; VPN_TECHNOLOGY="NordLynx"; VPN_PROTOCOL_ID="nordlynx" ;;
+esac
 
 # MTU cache
 MTU_CACHE=""
@@ -172,7 +204,7 @@ find_best_mtu() {
     local raw_network_mtu=$(( best_payload_size + ICMP_HEADER_SIZE ))
     local final_vpn_mtu
 
-    if [ "${VPN_TECHNOLOGY,,}" = "openvpn" ]; then
+    if [ "${VPN_TECHNOLOGY,,}" = "openvpn" ] || [ "${VPN_TECHNOLOGY,,}" = "nordwhisper" ]; then
       final_vpn_mtu=$(( raw_network_mtu - 100 ))
     else # Default to NordLynx
       final_vpn_mtu=$(( raw_network_mtu - 80 ))
@@ -188,7 +220,7 @@ find_best_mtu() {
 
 
 # --- Helpers ---
-find_vpn_iface() { ip -o link show | awk -F': ' '{print $2}' | grep -E "nordlynx|nordtun" | head -n1 || true; }
+find_vpn_iface() { ip -o link show | awk -F': ' '{print $2}' | grep -E "nordlynx|nordtun|qtun" | head -n1 || true; }
 
 # --- IPTables Helpers ---
 apply_iptables() {
@@ -268,10 +300,10 @@ find_best_server() {
 
   local api_group_identifier
   case "${VPN_GROUP}" in
-    "p2p") api_group_identifier="legacy_p2p" ;;
     "double_vpn") api_group_identifier="legacy_double_vpn" ;;
     "onion_over_vpn") api_group_identifier="legacy_onion_over_vpn" ;;
-    "obfuscated") api_group_identifier="legacy_obfuscated_servers" ;;
+    # NordWhisper obfuscation runs on regular servers; the API group still lists the old XOR servers
+    "obfuscated") api_group_identifier="" ;;
     "dedicated_ip") api_group_identifier="legacy_dedicated_ip" ;;
     *) api_group_identifier="${VPN_GROUP}" ;;
   esac
@@ -287,9 +319,17 @@ find_best_server() {
       group_filter="&filters[servers_groups][id]=${group_id}"
   fi
 
+  # Only recommend servers that support the configured protocol
+  local api_tech_identifier
+  case "${VPN_PROTOCOL_ID}" in
+    "nordlynx") api_tech_identifier="wireguard_udp" ;;
+    *) api_tech_identifier="${VPN_PROTOCOL_ID}" ;;
+  esac
+  local tech_filter="&filters[servers_technologies][identifier]=${api_tech_identifier}"
+
   debug_log "--> Step 1: Fetching recommended servers from NordVPN API..."
   local server_list
-  server_list=$(curl -s -g "https://api.nordvpn.com/v1/servers/recommendations?filters[country_id]=${country_id}${group_filter}&limit=15" | \
+  server_list=$(curl -s -g "https://api.nordvpn.com/v1/servers/recommendations?filters[country_id]=${country_id}${group_filter}${tech_filter}&limit=15" | \
     jq -r '.[].hostname')
 
   if [[ -z "$server_list" ]]; then log "Error: No recommended servers found."; return 1; fi
@@ -397,8 +437,7 @@ perform_speed_check() {
             nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
             do_connect # Reconnect using VPN_SERVER variable
             if [ -z "$context" ]; then
-                SWITCH_IP=$(curl -s --max-time 5 https://ipinfo.io/ip || echo "unknown")
-                log "✅ Server switch complete. VPN connection stable. Current WAN IP: ${SWITCH_IP}"
+                log_connect_result "Server switch"
             fi
 
             # --- NEW: Verify the new candidate recursively ---
@@ -532,8 +571,7 @@ sleep 1
 
 # --- Configuration Settings ---
 nordvpn set analytics disabled || true
-nordvpn set technology "${VPN_TECHNOLOGY}" || true
-if [ -n "${PROTOCOL}" ] && [ "${VPN_TECHNOLOGY,,}" = "openvpn" ]; then nordvpn set protocol "${PROTOCOL}" || true; fi
+nordvpn set protocol "${VPN_PROTOCOL_ID}" || true
 log "Logging in with token..."
 nordvpn login --token "$TOKEN" 2>&1 | grep -v -E "Welcome|By default|To limit" || true
 nordvpn set killswitch "${KILLSWITCH}" || true
@@ -542,7 +580,7 @@ nordvpn set lan-discovery "${LAN_DISCOVERY}" || true
 
 # --- Feature Settings ---
 nordvpn set notify off || true
-nordvpn set threatprotectionlite "$THREAT_PROTECTION_LITE" || true
+nordvpn set protection "$THREAT_PROTECTION_LITE" || true
 
 # Process comma-separated allowlist
 if [ -n "${ALLOWLIST_SUBNET}" ]; then
@@ -557,7 +595,7 @@ if [ "$THREAT_PROTECTION_LITE" != "on" ]; then
     log "Setting standard NordVPN DNS (103.86.x.x) to prevent DNS leaks."
     nordvpn set dns 103.86.96.100 103.86.99.100 || true
 else
-    log "Threat Protection Lite is active. Skipping manual DNS setting."
+    log "Real-time protection (THREAT_PROTECTION_LITE) is active. Skipping manual DNS setting."
 fi
 
 # --- Connect ---
@@ -579,7 +617,9 @@ do_connect() {
     timeout "${CONNECT_TIMEOUT}" nordvpn connect "${VPN_COUNTRY}" &> >(handle_output) || true
   fi
 
+  VPN_CONNECTED=0
   if nordvpn status | grep -q "Status: Connected"; then
+    VPN_CONNECTED=1
     if [[ "$is_reconnect" != "reconnect" && "${VPN_AUTO_CONNECT}" == "best" ]]; then
       VPN_SERVER=$(nordvpn status | grep 'Hostname:' | awk '{print $2}' | sed -E 's/\.nordvpn\.com//' || echo "")
     fi
@@ -611,14 +651,41 @@ do_connect() {
     echo "nameserver 103.86.96.100" > /etc/resolv.conf
     echo "nameserver 103.86.99.100" >> /etc/resolv.conf
   else
-    log "Threat Protection Lite is active. Trusting client DNS settings in resolv.conf."
+    log "Real-time protection (THREAT_PROTECTION_LITE) is active. Trusting client DNS settings in resolv.conf."
   fi
 
-  # --- NEW: Central Success Message ---
-  log "VPN connection established."
+  # --- Central Result Message ---
+  if [ "$VPN_CONNECTED" -eq 1 ]; then
+    log "VPN connection established."
+  else
+    log "❌ VPN connection failed (client reports not connected)."
+  fi
 }
 
+# --- Log the outcome of a connect attempt (uses VPN_CONNECTED from do_connect) ---
+log_connect_result() {
+  local action="$1"
+  if [ "$VPN_CONNECTED" -eq 1 ]; then
+    local wan_ip
+    wan_ip=$(curl -s --max-time 5 https://ipinfo.io/ip || echo "unknown")
+    log "✅ ${action} complete. VPN connection stable. Current WAN IP: ${wan_ip}"
+  else
+    log "❌ ${action} failed. VPN not connected - monitor will retry in ${CHECK_INTERVAL}s."
+  fi
+}
+
+VPN_CONNECTED=0
 do_connect
+
+# --- Startup retries: NordVPN may briefly reject connects (session/connection limit) ---
+STARTUP_ATTEMPT=1
+while [ "$VPN_CONNECTED" -eq 0 ] && [ "$STARTUP_ATTEMPT" -lt 3 ]; do
+  STARTUP_ATTEMPT=$((STARTUP_ATTEMPT + 1))
+  log "Retrying connection in 10s (attempt ${STARTUP_ATTEMPT}/3)..."
+  sleep 10
+  nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
+  do_connect "reconnect"
+done
 
 # --- Log wg-easy Hooks ---
 if [[ "${SHOW_WGHOOKS,,}" == "on" ]]; then
@@ -653,20 +720,13 @@ fi
 
 # --- STARTUP: Immediate Speed Check ---
 # Wait 10s for connection to fully stabilize, then check speed.
-if [ "${VPN_SPEED_CHECK_INTERVAL}" -gt 0 ]; then
+if [ "${VPN_SPEED_CHECK_INTERVAL}" -gt 0 ] && [ "$VPN_CONNECTED" -eq 1 ]; then
     log "Initializing immediate startup speed check (in 15s)..."
     sleep 15
     perform_speed_check "startup"
-    
-    # --- NEW: Final Success Message ---
-    # We fetch the IP again to confirm everything is routed correctly after the test
-    CURRENT_IP=$(curl -s --max-time 5 https://ipinfo.io/ip || echo "unknown")
-    log "✅ Startup complete. VPN connection stable. Current WAN IP: ${CURRENT_IP}"
-else
-    # If speed check is disabled, just print the success message immediately
-    CURRENT_IP=$(curl -s --max-time 5 https://ipinfo.io/ip || echo "unknown")
-    log "✅ Startup complete. VPN connection stable. Current WAN IP: ${CURRENT_IP}"
 fi
+# We fetch the IP again to confirm everything is routed correctly after the test
+log_connect_result "Startup"
 
 # --- Start background updater if enabled ---
 if [[ "${VPN_AUTO_CONNECT}" == "best" && "${VPN_BEST_SERVER_CHECK_INTERVAL}" -gt 0 ]]; then
@@ -680,7 +740,8 @@ LAST_SPEED_TEST=$(date +%s)
 
 # --- Loop ---
 while true; do
-  sleep "${CHECK_INTERVAL}"
+  # Background sleep + wait: lets SIGTERM interrupt immediately so cleanup can disconnect
+  sleep "${CHECK_INTERVAL}" & wait $!
   
   # --- DEBUG LOGGING ---
   if [ "$DEBUG" = "on" ]; then ping_output=$(ping -c 1 -w 3 1.1.1.1 2>&1 || true); if [ -n "$ping_output" ]; then printf '%s\n' "$ping_output" | while IFS= read -r line; do debug_log "Keep-alive ping: $line"; done; else debug_log "Keep-alive ping: failed (no output)"; fi; else ping -c 1 -w 3 1.1.1.1 > /dev/null 2>&1 || true; fi
@@ -690,8 +751,7 @@ while true; do
     service nordvpn restart || true
     sleep 2
     do_connect "reconnect"
-    RECONNECT_IP=$(curl -s --max-time 5 https://ipinfo.io/ip || echo "unknown")
-    log "✅ Reconnect complete. VPN connection stable. Current WAN IP: ${RECONNECT_IP}"
+    log_connect_result "Reconnect"
     LAST_REFRESH=$(date +%s)
     continue
   fi
@@ -726,8 +786,7 @@ while true; do
         nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
         do_connect "reconnect"
       fi
-      RECONNECT_IP=$(curl -s --max-time 5 https://ipinfo.io/ip || echo "unknown")
-      log "✅ Reconnect complete. VPN connection stable. Current WAN IP: ${RECONNECT_IP}"
+      log_connect_result "Reconnect"
       LAST_REFRESH=$NOW
       continue
     fi
@@ -770,15 +829,14 @@ while true; do
 
     # --- NEW: Immediate speed check after reconnect ---
     # Ensure the new connection actually delivers performance.
-    if [ "${VPN_SPEED_CHECK_INTERVAL}" -gt 0 ]; then
+    if [ "${VPN_SPEED_CHECK_INTERVAL}" -gt 0 ] && [ "$VPN_CONNECTED" -eq 1 ]; then
         log "Verifying connection speed after reconnect (in 15s)..."
         sleep 15
         perform_speed_check "reconnect"
     fi
     # -------------------------------------------------
 
-    RECONNECT_IP=$(curl -s --max-time 5 https://ipinfo.io/ip || echo "unknown")
-    log "✅ Reconnect complete. VPN connection stable. Current WAN IP: ${RECONNECT_IP}"
+    log_connect_result "Reconnect"
     continue
   fi
 
@@ -809,8 +867,7 @@ while true; do
       log "❌ Watchdog FAILED (High Packet Loss or Latency) -> Triggering Reconnect..."
       nordvpn disconnect 2>&1 | grep -v "How would you rate" || true
       do_connect "reconnect"
-      RECONNECT_IP=$(curl -s --max-time 5 https://ipinfo.io/ip || echo "unknown")
-      log "✅ Reconnect complete. VPN connection stable. Current WAN IP: ${RECONNECT_IP}"
+      log_connect_result "Reconnect"
       continue
   fi
 done

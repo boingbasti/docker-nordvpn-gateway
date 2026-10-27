@@ -22,7 +22,7 @@ services:
 
       # VPN Connection
       - VPN_COUNTRY=Germany
-      - VPN_GROUP=p2p
+      - VPN_GROUP=standard
       - VPN_AUTO_CONNECT=best
       - VPN_MTU=auto
       - VPN_TECHNOLOGY=NordLynx
