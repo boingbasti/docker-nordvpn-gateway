@@ -261,15 +261,12 @@ apply_wg_bypass_rules() {
     else
       log "WireGuard server bypass enabled. Re-applying rules for server $WIREGUARD_SERVER_IP and subnet $WIREGUARD_SUBNET..."
 
-      # Route for the return path (for data traffic)
-      if ! ip route show | grep -q "${WIREGUARD_SUBNET} via ${WIREGUARD_SERVER_IP}"; then
-        debug_log "--> Adding route for WireGuard subnet ${WIREGUARD_SUBNET}..."
-        ip route add "${WIREGUARD_SUBNET}" via "${WIREGUARD_SERVER_IP}"
+      # Route for the return path (for data traffic). 'replace' is idempotent across reconnects.
+      if ip route replace "${WIREGUARD_SUBNET}" via "${WIREGUARD_SERVER_IP}"; then
+        log "WireGuard bypass rules successfully applied."
       else
-        debug_log "--> Route for WireGuard subnet already exists."
+        log "WARNING: Could not set route for WireGuard subnet ${WIREGUARD_SUBNET} via ${WIREGUARD_SERVER_IP}."
       fi
-
-      log "WireGuard bypass rules successfully applied."
     fi
   fi
 }
@@ -531,7 +528,8 @@ fi
 # --- Robust Daemon Start ---
 log "Ensuring no stray daemon is running..."
 pkill -9 nordvpnd || true
-rm -f /run/nordvpn/nordvpnd.sock
+# Stale PID files survive a container restart; a reused PID makes nordvpnd refuse to start
+rm -f /run/nordvpn/nordvpnd.sock /run/nordvpn/nordvpnd.pid /run/nordvpn/nordvpn.pid
 sleep 1
 
 log "Starting NordVPN service daemon..."
@@ -618,7 +616,10 @@ do_connect() {
   fi
 
   VPN_CONNECTED=0
-  if nordvpn status | grep -q "Status: Connected"; then
+  # Capture first: 'nordvpn status | grep -q' can falsely fail under pipefail (SIGPIPE)
+  local connect_status
+  connect_status=$(nordvpn status || true)
+  if echo "$connect_status" | grep -q "Status: Connected"; then
     VPN_CONNECTED=1
     if [[ "$is_reconnect" != "reconnect" && "${VPN_AUTO_CONNECT}" == "best" ]]; then
       VPN_SERVER=$(nordvpn status | grep 'Hostname:' | awk '{print $2}' | sed -E 's/\.nordvpn\.com//' || echo "")
