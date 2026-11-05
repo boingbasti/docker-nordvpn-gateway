@@ -21,7 +21,7 @@ It supports **WireGuard server integration**, **DNS over VPN** via AdGuard Home,
 * 📈 **Gigabit-Ready Speed Tests** — Optional support for **100MB test files** (`SPEED_TEST_URL`) to accurately measure high-speed lines where TCP slow-start distorts results.
 * 🚀 **Adaptive MTU** — Fast **binary-search MTU** detection and TCP MSS clamping keep throughput stable.
 * 🧩 **WireGuard Bypass Mode** — Lets a local WireGuard server (e.g. **wg‑easy**) handshake and route through the VPN without the killswitch blocking it. **Requires macvlan**.
-* 🧭 **DNS Stability** — Inside the gateway namespace, NordVPN DNS (`103.86.96.100`) is enforced to prevent leaks.
+* 🧭 **DNS Stability** — Inside the gateway namespace, NordVPN DNS (`103.86.96.100`) is enforced to prevent leaks. With `THREAT_PROTECTION_LITE=on`, the DNS servers set by the NordVPN client are used instead.
 
 ---
 
@@ -291,6 +291,7 @@ networks:
 - **Laggy Connection** → Try `VPN_AUTO_CONNECT=off`. This lets NordVPN load-balancing decide instead of relying purely on ping.
 - **Container won’t start / macvlan errors** → Verify parent interface and recreate network with `-o parent=eth0` adjusted to your host.
 - **WG handshake blocked** → Enable `WIREGUARD_BYPASS=on` and verify `WIREGUARD_SERVER_IP`.
+- **`connection limit reached` in the daemon log** → Too many active sessions on your NordVPN account, or too many connects in a short time. The gateway retries automatically. If it persists, disconnect other devices and wait a few minutes.
 
 ---
 
